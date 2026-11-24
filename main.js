@@ -28,9 +28,17 @@ const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Frida
 const CMP_START = "%% journal-scroll-assistant: comparisons %%";
 const CMP_END = "%% /journal-scroll-assistant %%";
 
+// Gemini 4 family (Nov 2026). Hydrogen is Google's default general-purpose model.
+const MODELS = [
+  ["gemini-4-hydrogen", "Gemini 4 Hydrogen: balanced, the default"],
+  ["gemini-4-neon", "Gemini 4 Neon: frontier-level, fast"],
+  ["gemini-4-argon", "Gemini 4 Argon: efficient frontier reasoning"],
+  ["gemini-4-carbon", "Gemini 4 Carbon: most capable, highest cost"],
+];
+
 const DEFAULT_SETTINGS = {
   apiKey: "",
-  model: "gemini-2.5-flash",
+  model: "gemini-4-hydrogen",
   personas: "Elon Musk, Steve Jobs, Jensen Huang",
   areas: "Family, Health, Career, Hobbies, Self-realization",
   contextDays: 7,
@@ -120,9 +128,26 @@ function cell(s) {
 
 /* ---------------- Gemini ---------------- */
 
-async function gemini(settings, { system, contents, schema, temperature }) {
+/**
+ * One generateContent call. Gemini 4 rejects temperature/top_p/top_k, so none are sent.
+ * `thinking` is low | medium | high (the model default is high). If the endpoint rejects
+ * the thinking config, the call is retried once without it.
+ */
+async function gemini(settings, { system, contents, schema, thinking }) {
   if (!settings.apiKey) throw new Error("Add your Gemini API key in Journal Scroll Assistant settings.");
-  const generationConfig = { temperature: temperature == null ? 0.7 : temperature };
+  try {
+    return await geminiOnce(settings, { system, contents, schema, thinking });
+  } catch (e) {
+    if (thinking && e.status === 400 && /thinking/i.test(e.message)) {
+      return geminiOnce(settings, { system, contents, schema });
+    }
+    throw e;
+  }
+}
+
+async function geminiOnce(settings, { system, contents, schema, thinking }) {
+  const generationConfig = {};
+  if (thinking) generationConfig.thinkingConfig = { thinkingLevel: thinking };
   if (schema) {
     generationConfig.responseMimeType = "application/json";
     generationConfig.responseSchema = schema;
@@ -142,7 +167,9 @@ async function gemini(settings, { system, contents, schema, temperature }) {
   try { data = res.json; } catch (e) { data = null; }
   if (res.status >= 400) {
     const msg = data && data.error && data.error.message;
-    throw new Error(`Gemini ${res.status}: ${msg || "request failed"}`);
+    const err = new Error(`Gemini ${res.status}: ${msg || "request failed"}`);
+    err.status = res.status;
+    throw err;
   }
   const cand = data && data.candidates && data.candidates[0];
   const parts = (cand && cand.content && cand.content.parts) || [];
@@ -417,6 +444,7 @@ class AssistantPanel extends Component {
       let reply;
       try {
         reply = await gemini(s, {
+          thinking: "medium",
           system: [
             "You help the author of a private daily journal reflect on it.",
             "Answer from the journal text you were given. If it does not say, say so rather than guess.",
@@ -452,7 +480,7 @@ class AssistantPanel extends Component {
     await this.run(`Comparing with ${persona}…`, async () => {
       const ctx = await this.contextFor(entry, s.contextDays);
       const res = await gemini(s, {
-        temperature: 0.6,
+        thinking: "medium",
         system: [
           "You are a candid, encouraging performance coach.",
           `Compare the author's day in focus with how ${persona} would likely spend a comparable day,`,
@@ -524,7 +552,7 @@ class AssistantPanel extends Component {
     const text = await this.entryText(entry.file);
     if (!text) return null;
     const res = await gemini(this.plugin.settings, {
-      temperature: 0.4,
+      thinking: "low",
       system: TITLE_SYSTEM,
       contents: [{ role: "user", parts: [{ text: `Journal entry for ${longDate(entry.date)}:\n\n${text}` }] }],
       schema: TITLE_SCHEMA,
@@ -602,7 +630,7 @@ class AssistantPanel extends Component {
       }
       const areas = splitList(this.plugin.settings.areas);
       const md = await gemini(this.plugin.settings, {
-        temperature: 0.5,
+        thinking: "high",
         system: [
           "You turn a month of private daily journal entries into a timeline the author will keep.",
           "Write Markdown with exactly these sections:",
@@ -642,6 +670,11 @@ class AssistantPanel extends Component {
 class JournalScrollAssistant extends Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    // Gemini 2.x is being retired (2.5 Flash is rerouted to 3.5 Flash-Lite on 1 Dec 2026).
+    if (/^gemini-2[.-]/.test(this.settings.model || "")) {
+      this.settings.model = DEFAULT_SETTINGS.model;
+      await this.saveSettings();
+    }
     this.panels = new Map(); // view -> AssistantPanel
     this.addSettingTab(new AssistantSettingTab(this.app, this));
 
@@ -783,11 +816,34 @@ class AssistantSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Model")
-      .setDesc("Gemini model name, e.g. gemini-2.5-flash or gemini-2.5-pro.")
-      .addText((t) => t.setPlaceholder(DEFAULT_SETTINGS.model).setValue(s.model).onChange(async (v) => {
-        s.model = v.trim() || DEFAULT_SETTINGS.model;
-        await this.plugin.saveSettings();
-      }));
+      .setDesc("Hydrogen suits everyday use. Carbon is the most capable and costs the most. "
+        + "Pick Custom to type any other Gemini model code.")
+      .addDropdown((d) => {
+        for (const [id, label] of MODELS) d.addOption(id, label);
+        d.addOption("custom", "Custom…");
+        const known = MODELS.some(([id]) => id === s.model);
+        d.setValue(known && !this.customModel ? s.model : "custom").onChange(async (v) => {
+          this.customModel = v === "custom";
+          if (this.customModel) {
+            this.display();
+            return;
+          }
+          s.model = v;
+          await this.plugin.saveSettings();
+          this.display();
+        });
+      });
+
+    if (!MODELS.some(([id]) => id === s.model)) this.customModel = true;
+    if (this.customModel) {
+      new Setting(containerEl)
+        .setName("Custom model code")
+        .setDesc("Exact model code from Google AI Studio, e.g. gemini-3.5-flash-lite.")
+        .addText((t) => t.setPlaceholder(DEFAULT_SETTINGS.model).setValue(s.model).onChange(async (v) => {
+          s.model = v.trim() || DEFAULT_SETTINGS.model;
+          await this.plugin.saveSettings();
+        }));
+    }
 
     new Setting(containerEl)
       .setName("People to compare with")
