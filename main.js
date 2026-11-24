@@ -135,8 +135,30 @@ function cell(s) {
  * `thinking` is low | medium | high (the model default is high). If the endpoint rejects
  * the thinking config, the call is retried once without it.
  */
-async function gemini(settings, { system, contents, schema, thinking }) {
+// Temporary server-side failures: overloaded (503), rate-limited (429), internal errors.
+const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+const RETRY_DELAYS = [2000, 5000, 12000];
+
+async function gemini(settings, req, onRetry) {
   if (!settings.apiKey) throw new Error("Add your Gemini API key in Journal Scroll Assistant settings.");
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await geminiThinking(settings, req);
+    } catch (e) {
+      if (!RETRYABLE.has(e.status) || attempt >= RETRY_DELAYS.length) {
+        if (RETRYABLE.has(e.status)) {
+          e.message = `${settings.model} is busy or unavailable at Google right now (${e.status}), even after `
+            + `${RETRY_DELAYS.length} retries. Try again in a minute, or pick another model in settings.`;
+        }
+        throw e;
+      }
+      if (onRetry) onRetry(attempt + 1, e.status);
+      await sleep(RETRY_DELAYS[attempt]);
+    }
+  }
+}
+
+async function geminiThinking(settings, { system, contents, schema, thinking }) {
   try {
     return await geminiOnce(settings, { system, contents, schema, thinking });
   } catch (e) {
@@ -384,6 +406,12 @@ class AssistantPanel extends Component {
     return el;
   }
 
+  /** Retry callback for gemini(): show progress in the pending bubble. */
+  retrying(wait, base) {
+    return (n, status) => wait.setText(`${base} (Google is busy${status === 429 ? " (rate limit)" : ""}, `
+      + `retrying ${n} of ${RETRY_DELAYS.length}…)`);
+  }
+
   async run(label, fn) {
     if (this.busy) {
       new Notice("The assistant is still working on the last request.");
@@ -392,6 +420,7 @@ class AssistantPanel extends Component {
     this.busy = true;
     this.show();
     const wait = this.pending(label);
+    this.onRetry = this.retrying(wait, label);
     try {
       await fn(wait);
     } catch (e) {
@@ -399,6 +428,7 @@ class AssistantPanel extends Component {
     } finally {
       wait.remove();
       this.busy = false;
+      this.onRetry = null;
     }
   }
 
@@ -453,7 +483,7 @@ class AssistantPanel extends Component {
             "Be warm but direct, and brief: short paragraphs or bullets. Talk to the author as \"you\".",
           ].join("\n"),
           contents: this.history,
-        });
+        }, this.onRetry);
       } catch (e) {
         this.history.pop();
         throw e;
@@ -516,7 +546,7 @@ class AssistantPanel extends Component {
           },
           required: ["one_line", "persona_day", "went_well", "be_more_effective", "areas"],
         },
-      });
+      }, this.onRetry);
 
       const LEVEL = { focused: "● Focused", some: "◐ Some", neglected: "○ Neglected" };
       const md = [
@@ -558,7 +588,7 @@ class AssistantPanel extends Component {
       system: TITLE_SYSTEM,
       contents: [{ role: "user", parts: [{ text: `Journal entry for ${longDate(entry.date)}:\n\n${text}` }] }],
       schema: TITLE_SCHEMA,
-    });
+    }, this.onRetry);
     const title = String(res.title || "").trim().replace(/^["']|["']$/g, "").replace(/\.$/, "");
     const highlights = (res.highlights || []).map((h) => String(h).trim()).filter(Boolean).slice(0, 5);
     if (!title) return null;
@@ -597,7 +627,9 @@ class AssistantPanel extends Component {
     await this.run(`Titling ${todo.length} entries in ${month}…`, async (wait) => {
       const lines = [];
       for (const [i, e] of todo.entries()) {
-        wait.setText(`Titling ${fmtDate(e.date)} (${i + 1} of ${todo.length})…`);
+        const label = `Titling ${fmtDate(e.date)} (${i + 1} of ${todo.length})…`;
+        wait.setText(label);
+        this.onRetry = this.retrying(wait, label);
         try {
           const r = await this.generateTitle(e);
           lines.push(r ? `- **${fmtDate(e.date)}** — ${r.title}` : `- ${fmtDate(e.date)} — skipped (empty)`);
@@ -644,7 +676,7 @@ class AssistantPanel extends Component {
           "Use only what the entries say. Do not invent. First person is fine (\"I\"), matching the author.",
         ].join("\n"),
         contents: [{ role: "user", parts: [{ text: `Entries for ${month}:\n\n${parts.join("\n\n")}` }] }],
-      });
+      }, this.onRetry);
 
       const s = this.plugin.settings;
       const folder = normalizePath(`${this.view.dir}/${s.summariesFolder || "Summaries"}/${y}`);
