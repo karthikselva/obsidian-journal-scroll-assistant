@@ -77,8 +77,8 @@ const PRESETS = [
   { group: "Reflect", icon: "hourglass", scope: "month", label: "What am I putting off?",
     q: "What am I avoiding, postponing or leaving unfinished this month? Look for plans I mention but never follow up." },
   { group: "Reflect", icon: "scale", scope: "month", label: "How balanced is my life?",
-    q: "How much attention did each of my life areas get this month: {areas}? For each: focused, some or "
-      + "neglected, the evidence, and one small change." },
+    q: "How much attention did each of my life areas get this month: {areas}? For each: focused, some, "
+      + "neglected or barely present, the evidence, and one small change." },
   { group: "Reflect", icon: "activity", scope: "month", label: "How have my mood and energy been?",
     q: "How did my mood and energy move through this month? Where were the highs and lows, and what seems to drive them?" },
   { group: "Reflect", icon: "users", scope: "month", label: "Who have I spent time with?",
@@ -111,11 +111,42 @@ const CHAT_SYSTEM = [
   "Be warm but honest and direct. Use short paragraphs or bullets. Talk to the author as \"you\".",
 ].join("\n");
 
+// What each default life area covers, sent with every rating so the model rates consistently.
+// Areas the user adds in settings without a definition here are rated by their name alone.
+const AREA_DEFS = {
+  family: "time and attention with partner, children, parents and relatives",
+  networking: "time with people outside the family: friends, peers, the professional network, meetups and community events",
+  health: "sleep, food, exercise, medical care and rest",
+  career: "output at work: doing the job, shipping, earning, building the business, calls, demos, applications",
+  hobbies: "play and making things for their own sake: hobbies, games, crafts, music, tinkering",
+  growth: "investing in yourself: learning, reading, courses, practising a skill, deliberate reflection, spirituality",
+};
+
+const OLD_DEFAULT_AREAS = "Family, Health, Career, Hobbies, Self-realization";
+
+// The four ratings. "none" (shown as "not today") is neutral: the area just didn't come up.
+const LEVELS = ["focused", "some", "neglected", "none"];
+const RATING_SCALE = [
+  "Rate each life area for the day from the entry alone:",
+  "- \"focused\": clear, deliberate time or effort went into it.",
+  "- \"some\": touched on briefly.",
+  "- \"neglected\": the entry shows it was skipped, given up or pushed aside (e.g. \"skipped the gym again\", "
+    + "\"no time for the kids\", \"slept only 4 hours\").",
+  "- \"none\": not mentioned and no sign either way. Use this, not \"neglected\", when the entry is simply silent.",
+].join("\n");
+
+function areaGuide(areas) {
+  return areas.map((a) => {
+    const d = AREA_DEFS[a.toLowerCase()];
+    return `- ${a}${d ? `: ${d}` : ""}`;
+  }).join("\n");
+}
+
 const DEFAULT_SETTINGS = {
   apiKey: "",
   model: "gemini-3.5-flash-lite",
   personas: "Elon Musk, Steve Jobs, Jensen Huang",
-  areas: "Family, Health, Career, Hobbies, Self-realization",
+  areas: "Family, Networking, Health, Career, Hobbies, Growth",
   contextDays: 7,
   compareTimes: "6 AM, 9 AM, 12 PM, 4 PM, 9 PM",
   summariesFolder: "Summaries",
@@ -313,7 +344,7 @@ const TITLE_SCHEMA = {
         type: "OBJECT",
         properties: {
           area: { type: "STRING" },
-          level: { type: "STRING", enum: ["focused", "some", "neglected"] },
+          level: { type: "STRING", enum: LEVELS },
         },
         required: ["area", "level"],
       },
@@ -328,8 +359,8 @@ const TITLE_SYSTEM = [
   "No date, no quotation marks, no emoji, no trailing full stop.",
   "highlights: 2 to 5 short phrases (at most 10 words each), in the order they happened.",
   "Use only facts written in the entry. Never invent or embellish. Keep the author's own words where you can.",
-  "areas: rate how much time and effort the day put into each life area listed below, from the entry alone:",
-  "\"focused\" = clear, deliberate time or effort; \"some\" = touched on briefly; \"neglected\" = absent from the day.",
+  "areas: one row for every life area listed below.",
+  RATING_SCALE,
 ].join("\n");
 
 /* ---------------- month picker ---------------- */
@@ -516,6 +547,8 @@ class AssistantPanel extends Component {
       .onClick(() => this.titleMonth(this.focusMonth())));
     menu.addItem((i) => i.setTitle("Title and rate days in a month…").setIcon("calendar-search")
       .onClick(() => this.pickTitleMonth()));
+    menu.addItem((i) => i.setTitle("Re-rate life areas in a month…").setIcon("refresh-cw")
+      .onClick(() => this.pickTitleMonth(true)));
     menu.addSeparator();
     menu.addItem((i) => i.setTitle("Summarize this month as a timeline").setIcon("calendar-range")
       .onClick(() => this.monthTimeline(this.focusMonth())));
@@ -844,8 +877,8 @@ class AssistantPanel extends Component {
           `Compare the author's day in focus with how ${persona} would likely spend a comparable day,`,
           "based on what is publicly known about their habits and priorities. Earlier days are background only.",
           "Ground every claim about the author in the journal text. Never invent events in their life.",
-          `Rate each of these life areas for the day in focus: ${areas.join(", ")}.`,
-          "level is \"focused\" (clear time or attention), \"some\" (touched on) or \"neglected\" (absent).",
+          `areas: rate the day in focus on each of these life areas:\n${areaGuide(areas)}`,
+          RATING_SCALE,
           "Advice must be concrete and doable tomorrow, adapted to the author's life, not a copy of the persona's.",
           "",
           `timeline: an hour-by-hour comparison of the day in focus. Include a row for each of: ${times.join(", ")}.`,
@@ -884,7 +917,7 @@ class AssistantPanel extends Component {
                 type: "OBJECT",
                 properties: {
                   area: { type: "STRING" },
-                  level: { type: "STRING", enum: ["focused", "some", "neglected"] },
+                  level: { type: "STRING", enum: LEVELS },
                   evidence: { type: "STRING" },
                 },
                 required: ["area", "level", "evidence"],
@@ -895,7 +928,7 @@ class AssistantPanel extends Component {
         },
       }, this.onRetry);
 
-      const LEVEL = { focused: "● Focused", some: "◐ Some", neglected: "○ Neglected" };
+      const LEVEL = { focused: "▂▄▆ Focused", some: "▂▄ Some", neglected: "▂ Neglected", none: "· Not today" };
       const rows = (res.timeline || [])
         .filter((r) => r && r.time)
         .sort((a, b) => dayOrder(a.time) - dayOrder(b.time));
@@ -924,7 +957,7 @@ class AssistantPanel extends Component {
       await this.app.vault.process(entry.file, (text) => writeComparison(text, persona, callout));
       await this.plugin.setFrontmatter(entry.file, (fm) => {
         const focus = {};
-        for (const a of res.areas || []) if (a.area && a.level) focus[a.area] = a.level;
+        Object.assign(focus, this.focusMap(res.areas, areas));
         fm.focus = focus;
       });
       await this.addMessage("assistant", `### ${fmtDate(entry.date)} vs ${persona}\n\n${md}\n\n`
@@ -944,7 +977,7 @@ class AssistantPanel extends Component {
     const areas = splitList(this.plugin.settings.areas);
     const res = await gemini(this.plugin.settings, {
       thinking: "low",
-      system: `${TITLE_SYSTEM}\nLife areas: ${areas.join(", ")}.`,
+      system: `${TITLE_SYSTEM}\nLife areas:\n${areaGuide(areas)}`,
       contents: [{ role: "user", parts: [{ text: `Journal entry for ${longDate(entry.date)}:\n\n${text}` }] }],
       schema: TITLE_SCHEMA,
     }, this.onRetry);
@@ -971,7 +1004,7 @@ class AssistantPanel extends Component {
       .map((r) => [String(r.area).trim().toLowerCase(), String(r.level).toLowerCase()]));
     for (const a of areas) {
       const lv = byName.get(a.toLowerCase());
-      if (["focused", "some", "neglected"].includes(lv)) out[a] = lv;
+      if (LEVELS.includes(lv)) out[a] = lv;
     }
     return out;
   }
@@ -987,7 +1020,7 @@ class AssistantPanel extends Component {
   }
 
   focusLine(focus) {
-    const DOT = { focused: "🟢", some: "🟡", neglected: "🔴" };
+    const DOT = { focused: "🟢", some: "🟡", neglected: "🔴", none: "⚪" };
     return Object.entries(focus || {}).map(([a, l]) => `${DOT[l] || ""} ${a}`).join(" · ");
   }
 
@@ -1039,9 +1072,16 @@ class AssistantPanel extends Component {
     return normalizePath(`${this.summariesDir()}/${month.y}/${month.y}-${mm} ${MONTHS[month.m]} Timeline.md`);
   }
 
-  pickTitleMonth() {
+  /** rerate: redo life-area ratings on every day (titles are kept), e.g. after changing the areas. */
+  pickTitleMonth(rerate = false) {
     const months = this.journalMonths();
     if (!months.length) return new Notice("No journal entries in this view.");
+    if (rerate) {
+      const items = [{ label: "All months", note: `${this.entries().length} days`, value: "all" }]
+        .concat(months.map((mo) => ({ label: this.monthLabel(mo), note: `${mo.entries.length} days`, value: mo })));
+      return new MonthPickerModal(this.app, "Re-rate life areas in which month? Titles are kept.", items,
+        (v) => this.titleMonth(v, { rerate: true })).open();
+    }
     const items = [];
     const todoAll = months.reduce((n, mo) => n + mo.entries.filter((e) => this.needsWork(e)).length, 0);
     if (todoAll) {
@@ -1060,16 +1100,17 @@ class AssistantPanel extends Component {
   }
 
   /** Title every untitled day in `month` ({ y, m }), or in the whole journal when month is "all". */
-  async titleMonth(month) {
+  async titleMonth(month, { rerate = false } = {}) {
     if (!month) return new Notice("No journal entries in this view.");
     const all = month === "all";
     const scope = all ? "the whole journal" : this.monthLabel(month);
     const pool = all ? this.entries().slice().reverse() : this.monthEntries(month); // all: newest first
-    const todo = pool.filter((e) => this.needsWork(e));
+    const todo = rerate ? pool : pool.filter((e) => this.needsWork(e));
     this.show();
     if (!pool.length) return this.addMessage("system", `No entries in ${scope}.`);
     if (!todo.length) return this.addMessage("system", `Every entry in ${scope} already has a title and life-area ratings.`);
-    await this.addMessage("user", `Title and rate ${todo.length} day${todo.length === 1 ? "" : "s"} in ${scope}`);
+    const verb = rerate ? "Re-rate" : "Title and rate";
+    await this.addMessage("user", `${verb} ${todo.length} day${todo.length === 1 ? "" : "s"} in ${scope}`);
     let stop = false;
     await this.run(`Titling ${todo.length} entries in ${scope}…`, async (wait) => {
       // Long batches can be stopped; titles written so far are kept (they're already in the notes).
@@ -1151,7 +1192,7 @@ class AssistantPanel extends Component {
           "## Timeline — grouped by week (### Week of <d Mon>), bullets that start with the date like \"**3 Nov** —\".",
           "## People — who was around and in what context.",
           "## Themes — 3 to 6 recurring threads, one line each.",
-          `## Focus — one line each for ${areas.join(", ")}: how much attention it got this month.`,
+          `## Focus — one line each for these areas, on how much attention it got this month:\n${areaGuide(areas)}`,
           "Use only what the entries say. Do not invent. First person is fine (\"I\"), matching the author.",
         ].join("\n"),
         contents: [{ role: "user", parts: [{ text: `Entries for ${month}:\n\n${parts.join("\n\n")}` }] }],
@@ -1183,6 +1224,11 @@ class AssistantPanel extends Component {
 class JournalScrollAssistant extends Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    // Life areas moved to Family, Networking, Health, Career, Hobbies, Growth (Self-realization dropped).
+    if ((this.settings.areas || "").trim() === OLD_DEFAULT_AREAS) {
+      this.settings.areas = DEFAULT_SETTINGS.areas;
+      await this.saveSettings();
+    }
     // Gemini 2.x is being retired (2.5 Flash is rerouted to 3.5 Flash-Lite on 1 Dec 2026).
     if (/^gemini-2[.-]/.test(this.settings.model || "")) {
       this.settings.model = DEFAULT_SETTINGS.model;
@@ -1369,7 +1415,8 @@ class AssistantSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Life areas")
-      .setDesc("Comma-separated areas rated in comparisons and monthly timelines.")
+      .setDesc("Comma-separated areas rated on each day, in comparisons and in monthly timelines. "
+        + "After changing them, use \"Re-rate life areas in a month…\" to update days already rated.")
       .addText((t) => t.setValue(s.areas).onChange(async (v) => {
         s.areas = v;
         await this.plugin.saveSettings();
