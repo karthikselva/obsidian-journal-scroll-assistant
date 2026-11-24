@@ -1,5 +1,7 @@
 # Journal Scroll Assistant
 
+[![Add to Obsidian](https://img.shields.io/badge/Add_to-Obsidian-7C3AED?style=for-the-badge&logo=obsidian&logoColor=white)](https://community.obsidian.md/plugins/journal-scroll-assistant)
+
 A Gemini-powered companion for [Journal Scroll](https://github.com/karthikselva/obsidian-journal-scroll). It adds a button to the bottom-right corner of the Journal Scroll view. Click it for:
 
 - **Chat about this day.** Ask about the entry you're reading. The assistant also sees the few days before it.
@@ -31,6 +33,6 @@ Entries you ask about are sent to Google's Gemini API using your own key.
 ## Setup
 
 1. Install and enable Journal Scroll (0.4.0 or later shows titles and highlights).
-2. Install this plugin by copying `manifest.json`, `main.js` and `styles.css` into `<vault>/.obsidian/plugins/journal-scroll-assistant/`, then enable it.
+2. Install this plugin. In Obsidian, open *Settings → Community plugins → Browse*, search for **Journal Scroll Assistant**, then choose *Install* and *Enable*. Or open its [page in the Obsidian Community directory](https://community.obsidian.md/plugins/journal-scroll-assistant) and click **Add to Obsidian**. To install by hand instead, copy `manifest.json`, `main.js` and `styles.css` from the [latest release](https://github.com/karthikselva/obsidian-journal-scroll-assistant/releases/latest) into `<vault>/.obsidian/plugins/journal-scroll-assistant/`, then enable it.
 3. Paste a Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey) into the plugin's settings. It uses Gemini 3.5 Flash-Lite by default, the cheapest option. You can switch to a Gemini 4 model (Hydrogen, Neon, Argon, Carbon) or any other model code.
 4. Open Journal Scroll and click the ✦ button.
