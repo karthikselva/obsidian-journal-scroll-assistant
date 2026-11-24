@@ -28,9 +28,11 @@ const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Frida
 const CMP_START = "%% journal-scroll-assistant: comparisons %%";
 const CMP_END = "%% /journal-scroll-assistant %%";
 
-// Gemini 4 family (Nov 2026). Hydrogen is Google's default general-purpose model.
+// Nov 2026 prices per 1M tokens (in / out): Flash-Lite $0.30 / $2.50, Hydrogen $1.50 / $7.50,
+// Argon $2 / $10, Neon $3 / $15, Carbon $2 / $10, rising to $4 / $20 on 1 Dec 2026.
 const MODELS = [
-  ["gemini-4-hydrogen", "Gemini 4 Hydrogen: balanced, the default"],
+  ["gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite: fastest, cheapest (default)"],
+  ["gemini-4-hydrogen", "Gemini 4 Hydrogen: balanced, Google's general-purpose pick"],
   ["gemini-4-neon", "Gemini 4 Neon: frontier-level, fast"],
   ["gemini-4-argon", "Gemini 4 Argon: efficient frontier reasoning"],
   ["gemini-4-carbon", "Gemini 4 Carbon: most capable, highest cost"],
@@ -38,7 +40,7 @@ const MODELS = [
 
 const DEFAULT_SETTINGS = {
   apiKey: "",
-  model: "gemini-4-hydrogen",
+  model: "gemini-3.5-flash-lite",
   personas: "Elon Musk, Steve Jobs, Jensen Huang",
   areas: "Family, Health, Career, Hobbies, Self-realization",
   contextDays: 7,
@@ -816,7 +818,8 @@ class AssistantSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Model")
-      .setDesc("Hydrogen suits everyday use. Carbon is the most capable and costs the most. "
+      .setDesc("Flash-Lite is cheapest and fine for titles and quick questions. Hydrogen gives more "
+        + "thoughtful comparisons and timelines at about 3-5x the cost. Carbon is the most capable. "
         + "Pick Custom to type any other Gemini model code.")
       .addDropdown((d) => {
         for (const [id, label] of MODELS) d.addOption(id, label);

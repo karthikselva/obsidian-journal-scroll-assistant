@@ -26,5 +26,5 @@ Entries you ask about are sent to Google's Gemini API using your own key.
 
 1. Install and enable Journal Scroll (0.4.0 or later shows titles and highlights).
 2. Install this plugin by copying `manifest.json`, `main.js` and `styles.css` into `<vault>/.obsidian/plugins/journal-scroll-assistant/`, then enable it.
-3. Paste a Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey) into the plugin's settings. It uses Gemini 4 Hydrogen by default. You can switch to Neon, Argon, Carbon or any other model code.
+3. Paste a Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey) into the plugin's settings. It uses Gemini 3.5 Flash-Lite by default, the cheapest option. You can switch to a Gemini 4 model (Hydrogen, Neon, Argon, Carbon) or any other model code.
 4. Open Journal Scroll and click the ✦ button.
