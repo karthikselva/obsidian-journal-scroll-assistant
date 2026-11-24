@@ -1,7 +1,7 @@
 {
   "id": "journal-scroll-assistant",
   "name": "Journal Scroll Assistant",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "minAppVersion": "1.4.0",
   "description": "A Gemini assistant for Journal Scroll: chat about a day, compare it with someone you admire, title entries and write monthly timelines, all saved into your notes.",
   "author": "Karthik",

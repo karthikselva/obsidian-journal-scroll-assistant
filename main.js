@@ -38,6 +38,79 @@ const MODELS = [
   ["gemini-4-carbon", "Gemini 4 Carbon: most capable, highest cost"],
 ];
 
+/*
+ * Ready-made questions. scope picks the journal text the chat sees:
+ *   week          the 7 days ending with the day in view
+ *   month         the calendar month of the day in view
+ *   week-compare  that week and the 7 days before it
+ *   month-compare that month and the month before
+ *   year-compare  that month and the same month a year earlier
+ *   life          every monthly timeline note plus every day's title; the first answer is
+ *                 saved (and replaced on regeneration) as <summaries>/<save>.md
+ * {areas} is replaced with the life areas from settings.
+ */
+const PRESET_GROUPS = ["Your life", "Reflect", "Compare over time", "Summaries"];
+const PRESETS = [
+  { group: "Your life", icon: "fingerprint", scope: "life", label: "Who am I?", save: "Who am I",
+    q: "From my monthly timelines and day titles, write a portrait of who I am right now: my roles, what I care "
+      + "about, how I actually spend my days, my strengths, my recurring struggles, the people who matter and what "
+      + "drives me. Ground every point in evidence (months or dates). Write it to me as \"you\". "
+      + "End with three sentences that capture me." },
+  { group: "Your life", icon: "compass", scope: "life", label: "Who I need to be", save: "Who I need to be",
+    q: "Based on who I have been across these timelines (my goals, frustrations and what keeps recurring), describe "
+      + "who I need to become over the next year: the traits, habits and priorities to grow, what to let go of, "
+      + "and the first three concrete steps. Ground it in evidence. Be honest, not flattering." },
+  { group: "Your life", icon: "mountain", scope: "life", label: "How far I came", save: "How far I came",
+    q: "Trace how far I have come from the earliest period here to the latest: what changed in work, family, health, "
+      + "hobbies, skills and mindset; the turning points, with dates; and what stayed the same. "
+      + "End with what this trajectory suggests comes next." },
+  { group: "Reflect", icon: "thumbs-up", scope: "month", label: "What's going well this month?",
+    q: "What is going well for me this month? Group it by theme and cite the dates that show it." },
+  { group: "Reflect", icon: "thumbs-down", scope: "month", label: "What's not going well?",
+    q: "What is not going well for me this month? Be honest and point to the entries that show it." },
+  { group: "Reflect", icon: "target", scope: "month", label: "What should I focus on?",
+    q: "Based on this month, what are the 3 to 5 things I most need to focus on next, and why? "
+      + "Make each one concrete and doable." },
+  { group: "Reflect", icon: "repeat", scope: "month", label: "What patterns keep repeating?",
+    q: "What patterns repeat across this month: sleep, energy, habits, work rhythm, moods, food? "
+      + "Separate the helpful ones from the unhelpful ones." },
+  { group: "Reflect", icon: "hourglass", scope: "month", label: "What am I putting off?",
+    q: "What am I avoiding, postponing or leaving unfinished this month? Look for plans I mention but never follow up." },
+  { group: "Reflect", icon: "scale", scope: "month", label: "How balanced is my life?",
+    q: "How much attention did each of my life areas get this month: {areas}? For each: focused, some or "
+      + "neglected, the evidence, and one small change." },
+  { group: "Reflect", icon: "activity", scope: "month", label: "How have my mood and energy been?",
+    q: "How did my mood and energy move through this month? Where were the highs and lows, and what seems to drive them?" },
+  { group: "Reflect", icon: "users", scope: "month", label: "Who have I spent time with?",
+    q: "Who did I spend time with this month, how often and in what context? Who important seems to be missing?" },
+  { group: "Reflect", icon: "heart", scope: "month", label: "What can I be grateful for?",
+    q: "Which moments this month can I be grateful for? List specific ones with their dates." },
+  { group: "Reflect", icon: "graduation-cap", scope: "month", label: "What did this month teach me?",
+    q: "What lessons does this month hold? Give 3 to 5, each drawn from a specific moment, with its date." },
+  { group: "Compare over time", icon: "git-compare", scope: "week-compare", label: "This week vs last week",
+    q: "Compare this week with the week before it: what improved, what slipped, and what should I carry forward?" },
+  { group: "Compare over time", icon: "calendar-range", scope: "month-compare", label: "This month vs last month",
+    q: "Compare this month with last month: what changed in my work, family, health, hobbies and mindset? "
+      + "What improved and what slipped?" },
+  { group: "Compare over time", icon: "history", scope: "year-compare", label: "This month vs a year ago",
+    q: "Compare this month with the same month last year. How has my life changed? "
+      + "What have I grown in, and what have I lost or let go?" },
+  { group: "Summaries", icon: "calendar-days", scope: "week", label: "Summarize this week",
+    q: "Summarize my week in one short paragraph, then list the key events as bullets with dates." },
+  { group: "Summaries", icon: "trophy", scope: "month", label: "What did I get done this month?",
+    q: "List what I accomplished this month, big and small, with dates, grouped by area." },
+  { group: "Summaries", icon: "list-todo", scope: "month", label: "Open threads and follow-ups",
+    q: "List the open threads from this month: things I started, promised, planned or worried about that show "
+      + "no resolution yet. Include dates." },
+];
+
+const CHAT_SYSTEM = [
+  "You help the author of a private daily journal reflect on it.",
+  "Answer only from the journal text you were given, and cite dates (e.g. \"12 Nov\") or months as evidence.",
+  "If the text doesn't cover something, say so rather than guess. Never invent events.",
+  "Be warm but honest and direct. Use short paragraphs or bullets. Talk to the author as \"you\".",
+].join("\n");
+
 const DEFAULT_SETTINGS = {
   apiKey: "",
   model: "gemini-3.5-flash-lite",
@@ -236,7 +309,9 @@ class AssistantPanel extends Component {
     this.app = plugin.app;
     this.view = view;
     this.history = [];      // Gemini contents for the current chat; never saved
-    this.chatPath = null;   // entry the chat is about
+    this.chatKey = null;      // what the chat is about: "day:<path>" or "<scope>:<path>"
+    this.chatSource = "";     // note path for resolving links in replies
+    this.chatContext = null;  // async () => journal text the chat sees
     this.awaitingPersona = false;
     this.busy = false;
   }
@@ -251,6 +326,9 @@ class AssistantPanel extends Component {
     this.panel = host.createDiv({ cls: "jsa-panel is-hidden" });
     const head = this.panel.createDiv({ cls: "jsa-head" });
     this.titleEl = head.createDiv({ cls: "jsa-head-title", text: "Journal assistant" });
+    const ideas = head.createEl("button", { cls: "jsa-icon-btn", attr: { "aria-label": "Questions to ask" } });
+    setIcon(ideas, "lightbulb");
+    this.registerDomEvent(ideas, "click", () => this.showSuggestions());
     const menuBtn = head.createEl("button", { cls: "jsa-icon-btn", attr: { "aria-label": "Actions" } });
     setIcon(menuBtn, "more-horizontal");
     this.registerDomEvent(menuBtn, "click", (evt) => this.openMenu(evt));
@@ -364,6 +442,8 @@ class AssistantPanel extends Component {
     const menu = new Menu();
     menu.addItem((i) => i.setTitle("Chat about this day").setIcon("message-circle")
       .onClick(() => this.startChat()));
+    menu.addItem((i) => i.setTitle("Reflect, compare or summarize…").setIcon("lightbulb")
+      .onClick(() => this.showSuggestions()));
     menu.addSeparator();
     for (const p of splitList(s.personas)) {
       menu.addItem((i) => i.setTitle(`Compare with ${p}`).setIcon("users")
@@ -434,15 +514,16 @@ class AssistantPanel extends Component {
 
   /* ----- chat ----- */
 
+  /** Start (or resume) a chat about the day in view, with the days before it as context. */
   startChat() {
     const entry = this.focusEntry();
     if (!entry) return new Notice("No journal entries in this view.");
     this.awaitingPersona = false;
-    if (this.chatPath !== entry.file.path) {
-      this.history = [];
-      this.chatPath = entry.file.path;
-      this.messagesEl.empty();
-      const before = this.plugin.settings.contextDays - 1;
+    const key = `day:${entry.file.path}`;
+    if (this.chatKey !== key) {
+      const days = this.plugin.settings.contextDays;
+      this.newChat(key, entry.file.path, () => this.contextFor(entry, days));
+      const before = days - 1;
       this.addMessage("system", `Chatting about **${longDate(entry.date)}**`
         + (before > 0 ? `, with the ${before} day${before === 1 ? "" : "s"} before it for context.` : "."));
     }
@@ -450,6 +531,14 @@ class AssistantPanel extends Component {
     this.input.setAttr("placeholder", "Ask about this day…");
     this.show();
     this.input.focus();
+  }
+
+  newChat(key, sourcePath, context) {
+    this.history = [];
+    this.chatKey = key;
+    this.chatSource = sourcePath;
+    this.chatContext = context;
+    this.messagesEl.empty();
   }
 
   async submit() {
@@ -461,36 +550,209 @@ class AssistantPanel extends Component {
       this.input.setAttr("placeholder", "Ask about this day…");
       return this.compare(text);
     }
-    if (!this.chatPath) this.startChat();
-    const entry = this.entries().find((e) => e.file.path === this.chatPath) || this.focusEntry();
-    if (!entry) return;
-    await this.addMessage("user", text);
-    await this.run("Thinking…", async () => {
+    if (!this.chatKey) this.startChat();
+    if (!this.chatKey) return;
+    await this.ask(text);
+  }
+
+  /**
+   * Send one question in the current chat; the journal text is loaded on the first turn.
+   * Resolves to the reply, or null if it failed (the error is shown in the panel).
+   * `after(reply)` runs inside the same busy section, e.g. to save the reply to a note.
+   */
+  async ask(text, shown, after) {
+    await this.addMessage("user", shown || text);
+    let out = null;
+    await this.run("Thinking…", async (wait) => {
       const s = this.plugin.settings;
       if (!this.history.length) {
-        const ctx = await this.contextFor(entry, s.contextDays);
+        const ctx = await this.chatContext(wait);
         this.history.push({ role: "user", parts: [{ text: `My journal:\n\n${ctx}` }] });
         this.history.push({ role: "model", parts: [{ text: "Got it. What would you like to talk about?" }] });
+        wait.setText("Thinking…");
       }
       this.history.push({ role: "user", parts: [{ text }] });
       let reply;
       try {
-        reply = await gemini(s, {
-          thinking: "medium",
-          system: [
-            "You help the author of a private daily journal reflect on it.",
-            "Answer from the journal text you were given. If it does not say, say so rather than guess.",
-            "Be warm but direct, and brief: short paragraphs or bullets. Talk to the author as \"you\".",
-          ].join("\n"),
-          contents: this.history,
-        }, this.onRetry);
+        reply = await gemini(s, { thinking: "medium", system: CHAT_SYSTEM, contents: this.history }, this.onRetry);
       } catch (e) {
         this.history.pop();
+        if (this.history.length === 2) this.history = []; // reload the journal text on the next try
         throw e;
       }
       this.history.push({ role: "model", parts: [{ text: reply }] });
-      await this.addMessage("assistant", reply, { sourcePath: entry.file.path, copy: true });
+      const note = after ? await after(reply) : "";
+      await this.addMessage("assistant", reply + (note ? `\n\n${note}` : ""),
+        { sourcePath: this.chatSource, copy: true });
+      out = reply;
     });
+    return out;
+  }
+
+  /* ----- preset questions ----- */
+
+  showSuggestions() {
+    const entry = this.focusEntry();
+    if (!entry) return new Notice("No journal entries in this view.");
+    this.awaitingPersona = false;
+    this.show();
+    const month = `${MONTHS_LONG[entry.date.getMonth()]} ${entry.date.getFullYear()}`;
+    const box = this.messagesEl.createDiv({ cls: "jsa-suggest" });
+    box.createDiv({
+      cls: "jsa-suggest-intro",
+      text: `"Your life" reads every monthly timeline. The rest use ${month} or the week ending ${fmtDate(entry.date)}.`,
+    });
+    for (const group of PRESET_GROUPS) {
+      box.createDiv({ cls: "jsa-suggest-group", text: group });
+      const row = box.createDiv({ cls: "jsa-suggest-chips" });
+      for (const p of PRESETS.filter((x) => x.group === group)) {
+        const chip = row.createEl("button", { cls: "jsa-chip" });
+        setIcon(chip.createSpan({ cls: "jsa-chip-icon" }), p.icon);
+        chip.createSpan({ text: p.label });
+        this.registerDomEvent(chip, "click", () => this.askPreset(p));
+      }
+    }
+    this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+  }
+
+  /** The periods a scope covers, newest first: [{ label, entries }]. */
+  periodsFor(scope, entry) {
+    const all = this.entries();
+    const between = (a, b) => all.filter((e) => e.date >= a && e.date <= b);
+    const day = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+    const month = (y, m) => {
+      const first = new Date(y, m, 1);
+      return {
+        label: `${MONTHS_LONG[first.getMonth()]} ${first.getFullYear()}`,
+        entries: between(first, new Date(y, m + 1, 0)),
+      };
+    };
+    const week = (end) => ({
+      label: `the week ${fmtDate(day(end, -6))} to ${fmtDate(end)}`,
+      entries: between(day(end, -6), end),
+    });
+    const d = entry.date, y = d.getFullYear(), m = d.getMonth();
+    switch (scope) {
+      case "week": return [week(d)];
+      case "week-compare": return [week(d), week(day(d, -7))];
+      case "month-compare": return [month(y, m), month(y, m - 1)];
+      case "year-compare": return [month(y, m), month(y - 1, m)];
+      default: return [month(y, m)];
+    }
+  }
+
+  async periodText(period) {
+    const parts = [];
+    for (const e of period.entries) {
+      const fm = (this.app.metadataCache.getFileCache(e.file) || {}).frontmatter || {};
+      const title = typeof fm.title === "string" && fm.title.trim() ? ` — ${fm.title.trim()}` : "";
+      parts.push(`### ${longDate(e.date)}${title}\n${(await this.entryText(e.file)) || "(empty entry)"}`);
+    }
+    return parts.join("\n\n");
+  }
+
+  summariesDir() {
+    return normalizePath(`${this.view.dir}/${this.plugin.settings.summariesFolder || "Summaries"}`);
+  }
+
+  /** Monthly timeline notes, oldest first. */
+  timelineNotes() {
+    const root = this.summariesDir() + "/";
+    return this.app.vault.getMarkdownFiles()
+      .filter((f) => f.path.startsWith(root) && /^\d{4}-\d{2} \w+ Timeline$/.test(f.basename))
+      .sort((a, b) => a.basename.localeCompare(b.basename));
+  }
+
+  /** Every entry that has a title, as one line each. */
+  titleIndex() {
+    const lines = [];
+    for (const e of this.entries()) {
+      const fm = (this.app.metadataCache.getFileCache(e.file) || {}).frontmatter || {};
+      if (typeof fm.title === "string" && fm.title.trim()) lines.push(`- ${fmtDate(e.date)}: ${fm.title.trim()}`);
+    }
+    return lines;
+  }
+
+  /** Text for the "Your life" questions: all timelines (minus their title lists) plus the title index. */
+  async lifeContext(timelines, titles) {
+    const parts = [];
+    for (const f of timelines) {
+      let text = await this.app.vault.cachedRead(f);
+      const cache = this.app.metadataCache.getFileCache(f);
+      if (cache && cache.frontmatterPosition) text = text.slice(cache.frontmatterPosition.end.offset);
+      text = text.replace(/\n## Titles[\s\S]*$/, "").trim(); // the title index below covers these
+      parts.push(`## Timeline: ${f.basename.replace(/ Timeline$/, "")}\n\n${text}`);
+    }
+    if (titles.length) parts.push(`## Day titles (${titles.length})\n\n${titles.join("\n")}`);
+    return parts.join("\n\n");
+  }
+
+  async askPreset(p) {
+    if (this.busy) return new Notice("The assistant is still working on the last request.");
+    const entry = this.focusEntry();
+    if (!entry) return new Notice("No journal entries in this view.");
+    const areas = splitList(this.plugin.settings.areas).join(", ");
+    const question = p.q.replace("{areas}", areas);
+    this.input.setAttr("placeholder", "Ask a follow-up…");
+    this.titleEl.setText(`Journal assistant · ${p.label}`);
+
+    if (p.scope === "life") {
+      const timelines = this.timelineNotes();
+      const titles = this.titleIndex();
+      if (!timelines.length && !titles.length) {
+        return this.addMessage("system", "There's nothing to draw on yet. Use **Summarize this month as a "
+          + "timeline** on a few months, or **Title every untitled day this month**, then ask again.");
+      }
+      this.newChat(`life:${p.save}`, "", () => this.lifeContext(timelines, titles));
+      this.addMessage("system", `Reading **${timelines.length} monthly timeline${timelines.length === 1 ? "" : "s"}** `
+        + `and **${titles.length} day titles**.`
+        + (timelines.length < 3 ? " More timelines give a fuller answer." : "")
+        + " Ask follow-ups below.");
+      await this.ask(question, p.label, (reply) => this.saveLifeNote(p, reply, timelines.length, titles.length));
+      return;
+    }
+
+    const periods = this.periodsFor(p.scope, entry);
+    if (!periods[0].entries.length) {
+      return this.addMessage("system", `No entries in ${periods[0].label} yet.`);
+    }
+    const compare = periods.length > 1;
+    if (compare && !periods[1].entries.length) {
+      return this.addMessage("system", `Nothing to compare with: no entries in ${periods[1].label}.`);
+    }
+    this.newChat(`${p.scope}:${entry.file.path}`, entry.file.path, async () => {
+      const blocks = [];
+      for (const [i, per] of periods.entries()) {
+        const head = compare ? `${i ? "EARLIER" : "CURRENT"} PERIOD: ${per.label}` : `Entries from ${per.label}`;
+        blocks.push(`## ${head} (${per.entries.length} entries)\n\n${await this.periodText(per)}`);
+      }
+      return blocks.join("\n\n");
+    });
+    const scopeText = periods.map((per) => `${per.label} (${per.entries.length} entries)`).join(" vs ");
+    this.addMessage("system", `Looking at **${scopeText}**. Ask follow-ups below.`);
+    await this.ask(question, p.label);
+  }
+
+  /** Save a "Your life" answer to <summaries>/<name>.md, replacing the previous version. */
+  async saveLifeNote(p, reply, timelines, titles) {
+    const dir = this.summariesDir();
+    const path = normalizePath(`${dir}/${p.save}.md`);
+    const fm = stringifyYaml({
+      type: "life",
+      question: p.label,
+      generated: new Date().toISOString().slice(0, 10),
+      timelines,
+      titled_days: titles,
+      model: this.plugin.settings.model,
+    });
+    const note = `---\n${fm}---\n\n# ${p.label}\n\n${reply.trim()}\n\n`
+      + `*Generated from ${timelines} monthly timelines and ${titles} day titles. `
+      + "Ask again from Journal Scroll Assistant to regenerate it.*\n";
+    await this.plugin.ensureFolder(dir);
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFile) await this.app.vault.modify(existing, note);
+    else await this.app.vault.create(path, note);
+    return `*Saved to [[${path.replace(/\.md$/, "")}|${p.save}]].*`;
   }
 
   /* ----- compare ----- */

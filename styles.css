@@ -192,3 +192,62 @@
   --callout-color: var(--color-purple-rgb, 168, 130, 255);
   --callout-icon: lucide-users;
 }
+
+/* Suggested questions */
+.jsa-suggest {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-2, 8px);
+}
+
+.jsa-suggest-intro {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller, 12px);
+}
+
+.jsa-suggest-group {
+  margin-top: var(--size-4-1, 4px);
+  font-size: var(--font-ui-smaller, 12px);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+}
+
+.jsa-suggest-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--size-4-1, 4px) var(--size-4-2, 8px);
+}
+
+.jsa-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-4-1, 4px);
+  height: auto;
+  padding: var(--size-4-1, 4px) var(--size-4-2, 8px);
+  font-size: var(--font-ui-smaller, 12px);
+  color: var(--text-normal);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-l, 12px);
+  box-shadow: none;
+  cursor: pointer;
+  text-align: left;
+  white-space: normal;
+}
+
+.jsa-chip:hover {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+}
+
+.jsa-chip-icon {
+  display: inline-flex;
+  color: var(--text-accent);
+}
+
+.jsa-chip-icon svg {
+  width: 14px;
+  height: 14px;
+}
