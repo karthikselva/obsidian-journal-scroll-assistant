@@ -11,7 +11,7 @@ A Gemini-powered companion for [Journal Scroll](https://github.com/karthikselva/
   - *Reflect* on the month: what's going well, what isn't, what to focus on, repeating patterns, what you're putting off, life balance, mood and energy, who you spent time with, gratitude, lessons.
   - *Compare over time*: this week vs last, this month vs last, this month vs a year ago.
   - *Summaries*: this week, this month's accomplishments, open threads and follow-ups.
-- **Title and highlight this day**, or every untitled day in this month, any month you pick, or the whole journal (a long run can be stopped). Journal Scroll shows the title and highlights above the entry's date.
+- **Title, highlight and rate this day**, every day this month, any month you pick, or the whole journal. A long run can be stopped. Each day's life areas are rated focused, some or neglected, and Journal Scroll shows them as green, yellow and red tags on the date bar. Days that already have a title keep it and only get the missing ratings. Journal Scroll shows the title and highlights above the entry's date.
 - **Summarize this month, or any month you pick, as a timeline.** Covers weeks, people, themes and focus, with every day's title listed.
 
 ## Your data stays in your notes
@@ -20,7 +20,7 @@ Everything the assistant writes goes into Markdown in your vault:
 
 | What | Where |
 | --- | --- |
-| Title, highlights | `title:` and `highlights:` in the entry's frontmatter |
+| Title, highlights, life-area ratings | `title:` and `highlights:` in the entry's frontmatter |
 | Life-area focus from a comparison | `focus:` in the entry's frontmatter |
 | Comparison write-up | A folded `[!compare]` callout at the end of the entry, one per person, replaced when you compare again |
 | Who am I? / Who I need to be / How far I came | `<journal folder>/Summaries/<question>.md`, replaced each time you ask again |

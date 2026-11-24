@@ -307,8 +307,19 @@ const TITLE_SCHEMA = {
   properties: {
     title: { type: "STRING" },
     highlights: { type: "ARRAY", items: { type: "STRING" } },
+    areas: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          area: { type: "STRING" },
+          level: { type: "STRING", enum: ["focused", "some", "neglected"] },
+        },
+        required: ["area", "level"],
+      },
+    },
   },
-  required: ["title", "highlights"],
+  required: ["title", "highlights", "areas"],
 };
 
 const TITLE_SYSTEM = [
@@ -317,6 +328,8 @@ const TITLE_SYSTEM = [
   "No date, no quotation marks, no emoji, no trailing full stop.",
   "highlights: 2 to 5 short phrases (at most 10 words each), in the order they happened.",
   "Use only facts written in the entry. Never invent or embellish. Keep the author's own words where you can.",
+  "areas: rate how much time and effort the day put into each life area listed below, from the entry alone:",
+  "\"focused\" = clear, deliberate time or effort; \"some\" = touched on briefly; \"neglected\" = absent from the day.",
 ].join("\n");
 
 /* ---------------- month picker ---------------- */
@@ -497,11 +510,11 @@ class AssistantPanel extends Component {
     menu.addItem((i) => i.setTitle("Compare with someone else…").setIcon("user-plus")
       .onClick(() => this.askPersona()));
     menu.addSeparator();
-    menu.addItem((i) => i.setTitle("Title and highlight this day").setIcon("heading")
+    menu.addItem((i) => i.setTitle("Title, highlight and rate this day").setIcon("heading")
       .onClick(() => this.titleDay()));
-    menu.addItem((i) => i.setTitle("Title every untitled day this month").setIcon("list-checks")
+    menu.addItem((i) => i.setTitle("Title and rate every day this month").setIcon("list-checks")
       .onClick(() => this.titleMonth(this.focusMonth())));
-    menu.addItem((i) => i.setTitle("Title untitled days in a month…").setIcon("calendar-search")
+    menu.addItem((i) => i.setTitle("Title and rate days in a month…").setIcon("calendar-search")
       .onClick(() => this.pickTitleMonth()));
     menu.addSeparator();
     menu.addItem((i) => i.setTitle("Summarize this month as a timeline").setIcon("calendar-range")
@@ -921,23 +934,61 @@ class AssistantPanel extends Component {
 
   /* ----- titles ----- */
 
-  async generateTitle(entry) {
+  /**
+   * Title, highlights and life-area ratings for one entry, written to its frontmatter.
+   * An existing title and highlights are kept (only missing ratings are added) unless overwrite is set.
+   */
+  async generateTitle(entry, { overwrite = true } = {}) {
     const text = await this.entryText(entry.file);
     if (!text) return null;
+    const areas = splitList(this.plugin.settings.areas);
     const res = await gemini(this.plugin.settings, {
       thinking: "low",
-      system: TITLE_SYSTEM,
+      system: `${TITLE_SYSTEM}\nLife areas: ${areas.join(", ")}.`,
       contents: [{ role: "user", parts: [{ text: `Journal entry for ${longDate(entry.date)}:\n\n${text}` }] }],
       schema: TITLE_SCHEMA,
     }, this.onRetry);
     const title = String(res.title || "").trim().replace(/^["']|["']$/g, "").replace(/\.$/, "");
     const highlights = (res.highlights || []).map((h) => String(h).trim()).filter(Boolean).slice(0, 5);
+    const focus = this.focusMap(res.areas, areas);
     if (!title) return null;
+    const keep = !overwrite && this.hasTitle(entry);
     await this.plugin.setFrontmatter(entry.file, (fm) => {
-      fm.title = title;
-      fm.highlights = highlights;
+      if (!keep) {
+        fm.title = title;
+        fm.highlights = highlights;
+      }
+      if (Object.keys(focus).length) fm.focus = focus;
     });
-    return { title, highlights };
+    const fm = (this.app.metadataCache.getFileCache(entry.file) || {}).frontmatter || {};
+    return { title: keep ? String(fm.title) : title, highlights: keep ? [] : highlights, focus, kept: keep };
+  }
+
+  /** [{area, level}] from Gemini -> { Area: level } in the order of the settings' life areas. */
+  focusMap(rows, areas) {
+    const out = {};
+    const byName = new Map((rows || []).filter((r) => r && r.area && r.level)
+      .map((r) => [String(r.area).trim().toLowerCase(), String(r.level).toLowerCase()]));
+    for (const a of areas) {
+      const lv = byName.get(a.toLowerCase());
+      if (["focused", "some", "neglected"].includes(lv)) out[a] = lv;
+    }
+    return out;
+  }
+
+  hasFocus(e) {
+    const fm = (this.app.metadataCache.getFileCache(e.file) || {}).frontmatter;
+    return !!(fm && fm.focus && typeof fm.focus === "object" && Object.keys(fm.focus).length);
+  }
+
+  /** A day the batch should process: no title yet, or no life-area ratings yet. */
+  needsWork(e) {
+    return !this.hasTitle(e) || !this.hasFocus(e);
+  }
+
+  focusLine(focus) {
+    const DOT = { focused: "🟢", some: "🟡", neglected: "🔴" };
+    return Object.entries(focus || {}).map(([a, l]) => `${DOT[l] || ""} ${a}`).join(" · ");
   }
 
   async titleDay() {
@@ -947,7 +998,8 @@ class AssistantPanel extends Component {
       const r = await this.generateTitle(entry);
       if (!r) return this.addMessage("system", `${fmtDate(entry.date)} has no text to title.`);
       await this.addMessage("assistant", `**${fmtDate(entry.date)} — ${r.title}**\n\n`
-        + r.highlights.map((h) => `- ${h}`).join("\n"), { sourcePath: entry.file.path });
+        + r.highlights.map((h) => `- ${h}`).join("\n")
+        + (Object.keys(r.focus).length ? `\n\n${this.focusLine(r.focus)}` : ""), { sourcePath: entry.file.path });
     });
   }
 
@@ -991,19 +1043,19 @@ class AssistantPanel extends Component {
     const months = this.journalMonths();
     if (!months.length) return new Notice("No journal entries in this view.");
     const items = [];
-    const untitledAll = months.reduce((n, mo) => n + mo.entries.filter((e) => !this.hasTitle(e)).length, 0);
-    if (untitledAll) {
-      items.push({ label: "All months", note: `${untitledAll} untitled days across ${months.length} months`, value: "all" });
+    const todoAll = months.reduce((n, mo) => n + mo.entries.filter((e) => this.needsWork(e)).length, 0);
+    if (todoAll) {
+      items.push({ label: "All months", note: `${todoAll} days to title or rate across ${months.length} months`, value: "all" });
     }
     for (const mo of months) {
-      const untitled = mo.entries.filter((e) => !this.hasTitle(e)).length;
+      const todo = mo.entries.filter((e) => this.needsWork(e)).length;
       items.push({
         label: this.monthLabel(mo),
-        note: untitled ? `${untitled} of ${mo.entries.length} days untitled` : `All ${mo.entries.length} days titled`,
+        note: todo ? `${todo} of ${mo.entries.length} days to title or rate` : `All ${mo.entries.length} days done`,
         value: mo,
       });
     }
-    new MonthPickerModal(this.app, "Title untitled days in which month?", items,
+    new MonthPickerModal(this.app, "Title and rate days in which month?", items,
       (v) => this.titleMonth(v)).open();
   }
 
@@ -1013,11 +1065,11 @@ class AssistantPanel extends Component {
     const all = month === "all";
     const scope = all ? "the whole journal" : this.monthLabel(month);
     const pool = all ? this.entries().slice().reverse() : this.monthEntries(month); // all: newest first
-    const todo = pool.filter((e) => !this.hasTitle(e));
+    const todo = pool.filter((e) => this.needsWork(e));
     this.show();
     if (!pool.length) return this.addMessage("system", `No entries in ${scope}.`);
-    if (!todo.length) return this.addMessage("system", `Every entry in ${scope} already has a title.`);
-    await this.addMessage("user", `Title ${todo.length} untitled day${todo.length === 1 ? "" : "s"} in ${scope}`);
+    if (!todo.length) return this.addMessage("system", `Every entry in ${scope} already has a title and life-area ratings.`);
+    await this.addMessage("user", `Title and rate ${todo.length} day${todo.length === 1 ? "" : "s"} in ${scope}`);
     let stop = false;
     await this.run(`Titling ${todo.length} entries in ${scope}…`, async (wait) => {
       // Long batches can be stopped; titles written so far are kept (they're already in the notes).
@@ -1036,8 +1088,9 @@ class AssistantPanel extends Component {
           wait.setText(label);
           this.onRetry = this.retrying(wait, label);
           try {
-            const r = await this.generateTitle(e);
-            lines.push(r ? `- **${fmtDate(e.date)}** — ${r.title}` : `- ${fmtDate(e.date)} — skipped (empty)`);
+            const r = await this.generateTitle(e, { overwrite: false });
+            lines.push(r ? `- **${fmtDate(e.date)}** — ${r.title}${r.kept ? " (rated)" : ""}  ${this.focusLine(r.focus)}`
+              : `- ${fmtDate(e.date)} — skipped (empty)`);
             if (r) done++;
           } catch (err) {
             lines.push(`- ${fmtDate(e.date)} — failed: ${err.message || err}`);
