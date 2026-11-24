@@ -11,8 +11,8 @@ A Gemini-powered companion for [Journal Scroll](https://github.com/karthikselva/
   - *Reflect* on the month: what's going well, what isn't, what to focus on, repeating patterns, what you're putting off, life balance, mood and energy, who you spent time with, gratitude, lessons.
   - *Compare over time*: this week vs last, this month vs last, this month vs a year ago.
   - *Summaries*: this week, this month's accomplishments, open threads and follow-ups.
-- **Title and highlight this day**, or **every untitled day this month**. Journal Scroll shows the title and highlights above the entry's date.
-- **Summarize this month as a timeline.** Covers weeks, people, themes and focus, with every day's title listed.
+- **Title and highlight this day**, or every untitled day in this month, any month you pick, or the whole journal (a long run can be stopped). Journal Scroll shows the title and highlights above the entry's date.
+- **Summarize this month, or any month you pick, as a timeline.** Covers weeks, people, themes and focus, with every day's title listed.
 
 ## Your data stays in your notes
 

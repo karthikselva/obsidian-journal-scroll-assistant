@@ -13,7 +13,7 @@
  */
 
 const {
-  Plugin, PluginSettingTab, Setting, ItemView, Menu, Notice, MarkdownRenderer, Component,
+  Plugin, PluginSettingTab, Setting, ItemView, Menu, Notice, MarkdownRenderer, Component, SuggestModal,
   TFile, TFolder, requestUrl, normalizePath, setIcon, stringifyYaml,
 } = require("obsidian");
 
@@ -319,6 +319,32 @@ const TITLE_SYSTEM = [
   "Use only facts written in the entry. Never invent or embellish. Keep the author's own words where you can.",
 ].join("\n");
 
+/* ---------------- month picker ---------------- */
+
+/** Pick a month (newest first) or, if allowed, "All months". items: [{ label, note, value }]. */
+class MonthPickerModal extends SuggestModal {
+  constructor(app, placeholder, items, onChoose) {
+    super(app);
+    this.items = items;
+    this.onChoose = onChoose;
+    this.setPlaceholder(placeholder);
+  }
+
+  getSuggestions(query) {
+    const q = query.trim().toLowerCase();
+    return q ? this.items.filter((i) => i.label.toLowerCase().includes(q)) : this.items;
+  }
+
+  renderSuggestion(item, el) {
+    el.createDiv({ text: item.label });
+    if (item.note) el.createEl("small", { cls: "jsa-pick-note", text: item.note });
+  }
+
+  onChooseSuggestion(item) {
+    this.onChoose(item.value);
+  }
+}
+
 /* ---------------- the panel inside a Journal Scroll view ---------------- */
 
 class AssistantPanel extends Component {
@@ -474,9 +500,14 @@ class AssistantPanel extends Component {
     menu.addItem((i) => i.setTitle("Title and highlight this day").setIcon("heading")
       .onClick(() => this.titleDay()));
     menu.addItem((i) => i.setTitle("Title every untitled day this month").setIcon("list-checks")
-      .onClick(() => this.titleMonth()));
+      .onClick(() => this.titleMonth(this.focusMonth())));
+    menu.addItem((i) => i.setTitle("Title untitled days in a month…").setIcon("calendar-search")
+      .onClick(() => this.pickTitleMonth()));
+    menu.addSeparator();
     menu.addItem((i) => i.setTitle("Summarize this month as a timeline").setIcon("calendar-range")
-      .onClick(() => this.monthTimeline()));
+      .onClick(() => this.monthTimeline(this.focusMonth())));
+    menu.addItem((i) => i.setTitle("Summarize a month as a timeline…").setIcon("calendar-search")
+      .onClick(() => this.pickTimelineMonth()));
     menu.showAtMouseEvent(evt);
   }
 
@@ -920,48 +951,133 @@ class AssistantPanel extends Component {
     });
   }
 
-  monthEntries(entry) {
-    const y = entry.date.getFullYear(), m = entry.date.getMonth();
-    return this.entries().filter((e) => e.date.getFullYear() === y && e.date.getMonth() === m);
+  /** { y, m } of the day in view, or null. */
+  focusMonth() {
+    const entry = this.focusEntry();
+    return entry ? { y: entry.date.getFullYear(), m: entry.date.getMonth() } : null;
   }
 
-  async titleMonth() {
-    const entry = this.focusEntry();
-    if (!entry) return new Notice("No journal entries in this view.");
-    const todo = this.monthEntries(entry).filter((e) => {
-      const fm = (this.app.metadataCache.getFileCache(e.file) || {}).frontmatter;
-      return !(fm && typeof fm.title === "string" && fm.title.trim());
-    });
-    const month = `${MONTHS_LONG[entry.date.getMonth()]} ${entry.date.getFullYear()}`;
-    if (!todo.length) return this.addMessage("system", `Every entry in ${month} already has a title.`).then(() => this.show());
-    await this.run(`Titling ${todo.length} entries in ${month}…`, async (wait) => {
+  monthEntries(month) {
+    return this.entries().filter((e) => e.date.getFullYear() === month.y && e.date.getMonth() === month.m);
+  }
+
+  monthLabel(month) {
+    return `${MONTHS_LONG[month.m]} ${month.y}`;
+  }
+
+  /** Every month that has entries, newest first: [{ y, m, entries }]. */
+  journalMonths() {
+    const byKey = new Map();
+    for (const e of this.entries()) {
+      const y = e.date.getFullYear(), m = e.date.getMonth();
+      const key = y * 12 + m;
+      if (!byKey.has(key)) byKey.set(key, { y, m, entries: [] });
+      byKey.get(key).entries.push(e);
+    }
+    return Array.from(byKey.entries()).sort((a, b) => b[0] - a[0]).map(([, v]) => v);
+  }
+
+  hasTitle(e) {
+    const fm = (this.app.metadataCache.getFileCache(e.file) || {}).frontmatter;
+    return !!(fm && typeof fm.title === "string" && fm.title.trim());
+  }
+
+  timelinePath(month) {
+    const mm = String(month.m + 1).padStart(2, "0");
+    return normalizePath(`${this.summariesDir()}/${month.y}/${month.y}-${mm} ${MONTHS[month.m]} Timeline.md`);
+  }
+
+  pickTitleMonth() {
+    const months = this.journalMonths();
+    if (!months.length) return new Notice("No journal entries in this view.");
+    const items = [];
+    const untitledAll = months.reduce((n, mo) => n + mo.entries.filter((e) => !this.hasTitle(e)).length, 0);
+    if (untitledAll) {
+      items.push({ label: "All months", note: `${untitledAll} untitled days across ${months.length} months`, value: "all" });
+    }
+    for (const mo of months) {
+      const untitled = mo.entries.filter((e) => !this.hasTitle(e)).length;
+      items.push({
+        label: this.monthLabel(mo),
+        note: untitled ? `${untitled} of ${mo.entries.length} days untitled` : `All ${mo.entries.length} days titled`,
+        value: mo,
+      });
+    }
+    new MonthPickerModal(this.app, "Title untitled days in which month?", items,
+      (v) => this.titleMonth(v)).open();
+  }
+
+  /** Title every untitled day in `month` ({ y, m }), or in the whole journal when month is "all". */
+  async titleMonth(month) {
+    if (!month) return new Notice("No journal entries in this view.");
+    const all = month === "all";
+    const scope = all ? "the whole journal" : this.monthLabel(month);
+    const pool = all ? this.entries().slice().reverse() : this.monthEntries(month); // all: newest first
+    const todo = pool.filter((e) => !this.hasTitle(e));
+    this.show();
+    if (!pool.length) return this.addMessage("system", `No entries in ${scope}.`);
+    if (!todo.length) return this.addMessage("system", `Every entry in ${scope} already has a title.`);
+    await this.addMessage("user", `Title ${todo.length} untitled day${todo.length === 1 ? "" : "s"} in ${scope}`);
+    let stop = false;
+    await this.run(`Titling ${todo.length} entries in ${scope}…`, async (wait) => {
+      // Long batches can be stopped; titles written so far are kept (they're already in the notes).
+      const stopBtn = todo.length > 3 ? this.messagesEl.createEl("button", { cls: "jsa-stop", text: "Stop" }) : null;
+      if (stopBtn) this.registerDomEvent(stopBtn, "click", () => {
+        stop = true;
+        stopBtn.setText("Stopping after this one…");
+        stopBtn.disabled = true;
+      });
       const lines = [];
-      for (const [i, e] of todo.entries()) {
-        const label = `Titling ${fmtDate(e.date)} (${i + 1} of ${todo.length})…`;
-        wait.setText(label);
-        this.onRetry = this.retrying(wait, label);
-        try {
-          const r = await this.generateTitle(e);
-          lines.push(r ? `- **${fmtDate(e.date)}** — ${r.title}` : `- ${fmtDate(e.date)} — skipped (empty)`);
-        } catch (err) {
-          lines.push(`- ${fmtDate(e.date)} — failed: ${err.message || err}`);
-          if (/^Gemini 4(01|03)/.test(err.message || "")) break; // bad key: stop
-          await sleep(4000); // likely rate-limited; back off
+      let done = 0;
+      try {
+        for (const [i, e] of todo.entries()) {
+          if (stop) break;
+          const label = `Titling ${fmtDate(e.date)} (${i + 1} of ${todo.length})…`;
+          wait.setText(label);
+          this.onRetry = this.retrying(wait, label);
+          try {
+            const r = await this.generateTitle(e);
+            lines.push(r ? `- **${fmtDate(e.date)}** — ${r.title}` : `- ${fmtDate(e.date)} — skipped (empty)`);
+            if (r) done++;
+          } catch (err) {
+            lines.push(`- ${fmtDate(e.date)} — failed: ${err.message || err}`);
+            if (/^Gemini 4(01|03)/.test(err.message || "")) break; // bad key: stop
+            await sleep(4000); // likely rate-limited; back off
+          }
+          await sleep(400);
         }
-        await sleep(400);
+      } finally {
+        if (stopBtn) stopBtn.remove();
       }
-      await this.addMessage("assistant", `**${month}**\n\n${lines.join("\n")}`);
+      const head = stop ? `**${scope}: stopped after ${done} of ${todo.length}**` : `**${scope}: ${done} titled**`;
+      // Keep the summary readable for whole-journal runs.
+      const shown = lines.length > 40 ? [...lines.slice(0, 40), `- …and ${lines.length - 40} more`] : lines;
+      await this.addMessage("assistant", `${head}\n\n${shown.join("\n")}`);
     });
   }
 
   /* ----- monthly timeline ----- */
 
-  async monthTimeline() {
-    const entry = this.focusEntry();
-    if (!entry) return new Notice("No journal entries in this view.");
-    const list = this.monthEntries(entry);
-    const y = entry.date.getFullYear(), m = entry.date.getMonth();
+  pickTimelineMonth() {
+    const months = this.journalMonths();
+    if (!months.length) return new Notice("No journal entries in this view.");
+    const items = months.map((mo) => ({
+      label: this.monthLabel(mo),
+      note: `${mo.entries.length} days · `
+        + (this.app.vault.getAbstractFileByPath(this.timelinePath(mo)) ? "timeline exists (will be replaced)" : "no timeline yet"),
+      value: mo,
+    }));
+    new MonthPickerModal(this.app, "Summarize which month as a timeline?", items, (v) => this.monthTimeline(v)).open();
+  }
+
+  /** Write the timeline note for `target` ({ y, m }). */
+  async monthTimeline(target) {
+    if (!target) return new Notice("No journal entries in this view.");
+    const list = this.monthEntries(target);
+    const y = target.y, m = target.m;
     const month = `${MONTHS_LONG[m]} ${y}`;
+    this.show();
+    if (!list.length) return this.addMessage("system", `No entries in ${month}.`);
     await this.addMessage("user", `Summarize ${month} as a timeline`);
     await this.run(`Reading ${list.length} entries from ${month}…`, async () => {
       const titles = [];

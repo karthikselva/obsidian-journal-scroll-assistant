@@ -251,3 +251,14 @@
   width: 14px;
   height: 14px;
 }
+
+/* Month picker and batch stop button */
+.jsa-pick-note {
+  display: block;
+  color: var(--text-muted);
+}
+
+.jsa-stop {
+  align-self: center;
+  font-size: var(--font-ui-smaller, 12px);
+}
