@@ -5,7 +5,7 @@
 A Gemini-powered companion for [Journal Scroll](https://github.com/karthikselva/obsidian-journal-scroll). It adds a button to the bottom-right corner of the Journal Scroll view. Click it for:
 
 - **Chat about this day.** Ask about the entry you're reading. The assistant also sees the few days before it.
-- **Compare with someone.** See how Elon Musk, Steve Jobs, Jensen Huang, or anyone you name might spend a day like yours. You get what went well, how to be more effective, and which life areas (family, health, career, hobbies, self-realization) got attention or were neglected.
+- **Compare with someone.** See how Elon Musk, Steve Jobs, Jensen Huang, or anyone you name might spend a day like yours. An hour-by-hour table sets what they'd be doing next to what you did, at 6 AM, 9 AM, 12 PM, 4 PM and 9 PM (you can change these) plus any times you wrote down. Where your entry doesn't say, it shows "Not in the journal" rather than a guess. Then you get what went well, how to be more effective, and which life areas (family, health, career, hobbies, self-realization) got attention or were neglected.
 - **Questions to ask** (the 💡 button). Each starts a chat you can follow up on:
   - *Your life*: **Who am I?**, **Who I need to be** and **How far I came** read all your monthly timelines plus every day's title. Each answer is saved as a note in `Summaries/` and replaced when you ask again.
   - *Reflect* on the month: what's going well, what isn't, what to focus on, repeating patterns, what you're putting off, life balance, mood and energy, who you spent time with, gratitude, lessons.

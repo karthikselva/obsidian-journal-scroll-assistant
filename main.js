@@ -117,6 +117,7 @@ const DEFAULT_SETTINGS = {
   personas: "Elon Musk, Steve Jobs, Jensen Huang",
   areas: "Family, Health, Career, Hobbies, Self-realization",
   contextDays: 7,
+  compareTimes: "6 AM, 9 AM, 12 PM, 4 PM, 9 PM",
   summariesFolder: "Summaries",
 };
 
@@ -191,6 +192,24 @@ function writeComparison(text, persona, callout) {
   all.set(persona, callout.trim());
   const body = stripComparisons(text).replace(/\s+$/, "");
   return `${body}\n\n${CMP_START}\n\n${Array.from(all.values()).join("\n\n")}\n\n${CMP_END}\n`;
+}
+
+/** Minutes after midnight for "6 AM", "9:30 am", "12 PM", "21:00"; Infinity if unparseable. */
+function timeOfDay(t) {
+  const m = /(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?/i.exec(String(t || ""));
+  if (!m) return Infinity;
+  let h = +m[1] % 24;
+  const min = m[2] ? +m[2] : 0;
+  const ap = (m[3] || "").toLowerCase();
+  if (ap === "pm" && h < 12) h += 12;
+  if (ap === "am" && h === 12) h = 0;
+  return h * 60 + min;
+}
+
+/** Sort key for a journal day, which runs past midnight: 12:30 AM comes after 9 PM, not before 6 AM. */
+function dayOrder(t) {
+  const m = timeOfDay(t);
+  return m < 4 * 60 ? m + 24 * 60 : m;
 }
 
 function quote(md) {
@@ -770,6 +789,7 @@ class AssistantPanel extends Component {
     if (!entry) return new Notice("No journal entries in this view.");
     const s = this.plugin.settings;
     const areas = splitList(s.areas);
+    const times = splitList(s.compareTimes || DEFAULT_SETTINGS.compareTimes);
     await this.addMessage("user", `Compare ${fmtDate(entry.date)} with ${persona}`);
     await this.run(`Comparing with ${persona}…`, async () => {
       const ctx = await this.contextFor(entry, s.contextDays);
@@ -783,6 +803,15 @@ class AssistantPanel extends Component {
           `Rate each of these life areas for the day in focus: ${areas.join(", ")}.`,
           "level is \"focused\" (clear time or attention), \"some\" (touched on) or \"neglected\" (absent).",
           "Advice must be concrete and doable tomorrow, adapted to the author's life, not a copy of the persona's.",
+          "",
+          `timeline: an hour-by-hour comparison of the day in focus. Include a row for each of: ${times.join(", ")}.`,
+          "Also add a row for any other time the author wrote down for that day (e.g. \"woke up at 9.30AM\").",
+          "Rows in chronological order; time written like \"6 AM\" or \"9:30 AM\".",
+          `persona: what ${persona} would typically be doing at that hour, from public accounts of their routine. Max 15 words.`,
+          "me: what the author was doing then, in their own terms and times. If the entry clearly implies it",
+          "(e.g. still asleep before a stated wake-up time), say so. If it doesn't say, write exactly \"Not in the journal\".",
+          "Never fill a gap with a guess about the author. Max 15 words.",
+          "",
           "Speak to the author as \"you\".",
         ].join("\n"),
         contents: [{ role: "user", parts: [{ text: `My journal:\n\n${ctx}` }] }],
@@ -791,6 +820,18 @@ class AssistantPanel extends Component {
           properties: {
             one_line: { type: "STRING" },
             persona_day: { type: "STRING" },
+            timeline: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: {
+                  time: { type: "STRING" },
+                  persona: { type: "STRING" },
+                  me: { type: "STRING" },
+                },
+                required: ["time", "persona", "me"],
+              },
+            },
             went_well: { type: "ARRAY", items: { type: "STRING" } },
             be_more_effective: { type: "ARRAY", items: { type: "STRING" } },
             areas: {
@@ -806,15 +847,22 @@ class AssistantPanel extends Component {
               },
             },
           },
-          required: ["one_line", "persona_day", "went_well", "be_more_effective", "areas"],
+          required: ["one_line", "persona_day", "timeline", "went_well", "be_more_effective", "areas"],
         },
       }, this.onRetry);
 
       const LEVEL = { focused: "● Focused", some: "◐ Some", neglected: "○ Neglected" };
+      const rows = (res.timeline || [])
+        .filter((r) => r && r.time)
+        .sort((a, b) => dayOrder(a.time) - dayOrder(b.time));
       const md = [
         `**${res.one_line}**`,
         "",
-        `**What ${persona} might be doing:** ${res.persona_day}`,
+        `| Time | ${cell(persona)} | You |`,
+        "| --- | --- | --- |",
+        ...rows.map((r) => `| **${cell(r.time)}** | ${cell(r.persona)} | ${cell(r.me)} |`),
+        "",
+        `**${persona}'s day in short:** ${res.persona_day}`,
         "",
         "**What went well**",
         ...(res.went_well || []).map((x) => `- ${x}`),
@@ -1157,6 +1205,16 @@ class AssistantSettingTab extends PluginSettingTab {
         s.areas = v;
         await this.plugin.saveSettings();
       }));
+
+    new Setting(containerEl)
+      .setName("Comparison times")
+      .setDesc("Comma-separated times of day for the hour-by-hour table in comparisons. "
+        + "Times you wrote in the entry are added too.")
+      .addText((t) => t.setPlaceholder(DEFAULT_SETTINGS.compareTimes).setValue(s.compareTimes)
+        .onChange(async (v) => {
+          s.compareTimes = v.trim() || DEFAULT_SETTINGS.compareTimes;
+          await this.plugin.saveSettings();
+        }));
 
     new Setting(containerEl)
       .setName("Days of context")
