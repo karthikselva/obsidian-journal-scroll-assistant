@@ -2,6 +2,10 @@
 
 Companion to `D:\GitRepos\obsidian-journal-scroll` (view type `journal-scroll-view`). Same conventions as that repo: plain CommonJS, no build step, only `require("obsidian")`, mobile-safe (`requestUrl`, no Node APIs), no `innerHTML`/`el.style`/console logging, sentence-case UI.
 
+## Releasing
+
+Public repo `karthikselva/obsidian-journal-scroll-assistant`. Bump `manifest.json` and add the version to `versions.json`, commit and push, then `git tag <x.y.z> && git push origin <x.y.z>` (no `v`). `.github/workflows/release.yml` attests and attaches `main.js`, `manifest.json` and `styles.css`. Don't create releases by hand. The Obsidian community directory listing is managed at community.obsidian.md → Account → Plugins.
+
 ## Hard rule: no data outside Markdown
 
 The owner's requirement: every output lives in the daily notes or in Markdown under the journal folder. Plugin `data.json` holds **configuration only** (API key, model, personas, areas, context days, summaries folder). Never cache titles, chats or results there.
