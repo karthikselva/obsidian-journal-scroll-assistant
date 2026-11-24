@@ -143,9 +143,11 @@ function areaGuide(areas) {
 }
 
 const DEFAULT_SETTINGS = {
-  apiKey: "",
-  model: "gemini-3.5-flash-lite",
+  // Per provider: { enabled, apiKey, baseUrl, models: [] }. Filled in by onload (see PROVIDERS).
+  providers: {},
+  activeModel: "",          // "<provider>::<model>"; empty = the first model of the first enabled provider
   personas: "Elon Musk, Steve Jobs, Jensen Huang",
+  personaNews: true,        // comparisons with a living person use that day's news about them
   areas: "Family, Networking, Health, Career, Hobbies, Growth",
   contextDays: 7,
   compareTimes: "6 AM, 9 AM, 12 PM, 4 PM, 9 PM",
@@ -251,27 +253,127 @@ function cell(s) {
   return String(s || "").replace(/\|/g, "\\|").replace(/\n+/g, " ").trim();
 }
 
-/* ---------------- Gemini ---------------- */
-
-/**
- * One generateContent call. Gemini 4 rejects temperature/top_p/top_k, so none are sent.
- * `thinking` is low | medium | high (the model default is high). If the endpoint rejects
- * the thinking config, the call is retried once without it.
+/* ---------------- model providers ---------------- */
+/*
+ * Every request goes through llm(), which sends it to the active model: "<provider>::<model>"
+ * in settings.activeModel, picked in settings or from the chat header. Requests are written
+ * once in Gemini's shape ({ system, contents: [{ role: "user"|"model", parts: [{ text }] }],
+ * schema, thinking }) and translated for each provider here:
+ *   gemini     Google's generateContent API
+ *   openai     any OpenAI-compatible /chat/completions API: OpenAI itself, and Hermes
+ *              (Nous Portal's inference API, which serves DeepSeek, Hermes and more)
+ *   anthropic  the Claude Messages API
+ * All are plain HTTPS through Obsidian's requestUrl (no SDKs: this plugin has no build step).
  */
+const PROVIDERS = [
+  {
+    id: "gemini", kind: "gemini", label: "Google Gemini", short: "Gemini",
+    blurb: "Google's Gemini API. Key from Google AI Studio (aistudio.google.com/apikey).",
+    keyPlaceholder: "AIza…",
+    defaultModels: ["gemini-3.5-flash-lite"],
+    suggestions: MODELS.map(([name, hint]) => ({ name, hint })),
+  },
+  {
+    id: "openai", kind: "openai", label: "OpenAI (ChatGPT)", short: "ChatGPT",
+    blurb: "ChatGPT models through the OpenAI API. Key from platform.openai.com/api-keys "
+      + "(a ChatGPT subscription doesn't include API access).",
+    keyPlaceholder: "sk-…",
+    baseUrl: "https://api.openai.com/v1",
+    defaultModels: ["gpt-5.5"],
+    suggestions: [
+      { name: "gpt-6-astra", hint: "Newest flagship" },
+      { name: "gpt-5.6-sol", hint: "GPT-5.6, largest" },
+      { name: "gpt-5.6-terra", hint: "GPT-5.6, balanced" },
+      { name: "gpt-5.6-luna", hint: "GPT-5.6, fastest" },
+      { name: "gpt-5.5", hint: "GPT-5.5" },
+      { name: "gpt-5.4-mini", hint: "Small and cheap" },
+    ],
+  },
+  {
+    id: "anthropic", kind: "anthropic", label: "Anthropic (Claude)", short: "Claude",
+    blurb: "Claude models through the Claude API. Key from the Claude Console (platform.claude.com).",
+    keyPlaceholder: "sk-ant-…",
+    defaultModels: ["claude-opus-5-5"],
+    suggestions: [
+      { name: "claude-opus-5-5", hint: "Claude Opus 5.5: most capable Opus, the default" },
+      { name: "claude-sonnet-5-5", hint: "Claude Sonnet 5.5: fast and capable, lower cost" },
+      { name: "claude-haiku-5-5", hint: "Claude Haiku 5.5: fastest, cheapest" },
+      { name: "claude-fable-5-2", hint: "Claude Fable 5.2: Anthropic's most capable, highest cost" },
+    ],
+  },
+  {
+    id: "hermes", kind: "openai", label: "Hermes (Nous Portal)", short: "Hermes",
+    blurb: "Nous Research's inference API, the provider behind Hermes Agent. One key for DeepSeek V4, "
+      + "Hermes and many others. Key from portal.nousresearch.com.",
+    keyPlaceholder: "Nous Portal API key",
+    baseUrl: "https://inference-api.nousresearch.com/v1",
+    defaultModels: ["deepseek/deepseek-v4-flash-0731"],
+    suggestions: [
+      { name: "deepseek/deepseek-v4-flash-0731", hint: "DeepSeek V4 Flash: fast, very cheap" },
+      { name: "deepseek/deepseek-v4-pro", hint: "DeepSeek V4 Pro: stronger reasoning" },
+      { name: "anthropic/claude-sonnet-5", hint: "Claude Sonnet 5 through Nous" },
+      { name: "openai/gpt-5.5", hint: "GPT-5.5 through Nous" },
+      { name: "google/gemini-3.8-flash", hint: "Gemini 3.8 Flash through Nous" },
+      { name: "x-ai/grok-4.6", hint: "Grok 4.6 through Nous" },
+    ],
+  },
+];
+
+function providerDef(id) {
+  return PROVIDERS.find((p) => p.id === id) || null;
+}
+
+function modelKey(pid, model) {
+  return `${pid}::${model}`;
+}
+
+/** Every selectable model, in provider order: [{ pid, model, key, def }]. Only switched-on providers count. */
+function enabledModels(settings) {
+  const out = [];
+  for (const def of PROVIDERS) {
+    const cfg = settings.providers && settings.providers[def.id];
+    if (!cfg || !cfg.enabled) continue;
+    for (const model of cfg.models || []) out.push({ pid: def.id, model, key: modelKey(def.id, model), def });
+  }
+  return out;
+}
+
+/** The model requests go to: the saved choice if it's still available, else the first available one. */
+function activeModel(settings) {
+  const all = enabledModels(settings);
+  return all.find((m) => m.key === settings.activeModel) || all[0] || null;
+}
+
+function modelLabel(m) {
+  return m ? `${m.def.short} · ${m.model}` : "no model";
+}
+
 // Temporary server-side failures: overloaded (503), rate-limited (429), internal errors.
-const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+const RETRYABLE = new Set([429, 500, 502, 503, 504, 529]);
 const RETRY_DELAYS = [2000, 5000, 12000];
 
-async function gemini(settings, req, onRetry) {
-  if (!settings.apiKey) throw new Error("Add your Gemini API key in Journal Scroll Assistant settings.");
+/**
+ * Send one request to a model: `target` ({ pid, model }) or the active model. Retries
+ * temporary failures; anything else is thrown with the provider named in the message.
+ * Resolves to text, or to parsed JSON when `req.schema` is given.
+ */
+async function llm(settings, req, onRetry, target) {
+  const m = target ? { ...target, def: providerDef(target.pid) } : activeModel(settings);
+  if (!m || !m.def) {
+    throw new Error("No model is set up. Open Journal Scroll Assistant settings → Models, switch on a "
+      + "provider, add its API key and at least one model.");
+  }
+  const cfg = (settings.providers || {})[m.pid] || {};
+  if (!cfg.apiKey) throw new Error(`Add your ${m.def.label} API key in Journal Scroll Assistant settings → Models.`);
+  const call = { gemini: callGemini, openai: callOpenAI, anthropic: callAnthropic }[m.def.kind];
   for (let attempt = 0; ; attempt++) {
     try {
-      return await geminiThinking(settings, req);
+      return await call(cfg, m.model, req, m.def);
     } catch (e) {
       if (!RETRYABLE.has(e.status) || attempt >= RETRY_DELAYS.length) {
         if (RETRYABLE.has(e.status)) {
-          e.message = `${settings.model} is busy or unavailable at Google right now (${e.status}), even after `
-            + `${RETRY_DELAYS.length} retries. Try again in a minute, or pick another model in settings.`;
+          e.message = `${modelLabel(m)} is busy or unavailable right now (${e.status}), even after `
+            + `${RETRY_DELAYS.length} retries. Pick another model and retry.`;
         }
         throw e;
       }
@@ -281,18 +383,75 @@ async function gemini(settings, req, onRetry) {
   }
 }
 
-async function geminiThinking(settings, { system, contents, schema, thinking }) {
+/** POST JSON; throws an Error with .status and the provider's own message on HTTP errors. */
+async function postJson(url, headers, body, who) {
+  const res = await requestUrl({
+    url, method: "POST", contentType: "application/json", headers, body: JSON.stringify(body), throw: false,
+  });
+  let data = null;
+  try { data = res.json; } catch (e) { data = null; }
+  if (res.status >= 400) {
+    const err0 = data && data.error;
+    const msg = (err0 && (err0.message || (typeof err0 === "string" ? err0 : ""))) || (data && data.message) || "";
+    const err = new Error(`${who} ${res.status}: ${msg || "request failed"}`);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
+/** Parse a model's JSON reply, tolerating ```json fences or text around the object. */
+function parseJsonReply(text, who) {
+  const t = String(text || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
+  try { return JSON.parse(t); } catch (e) { /* fall through */ }
+  const a = t.indexOf("{"), b = t.lastIndexOf("}");
+  if (a >= 0 && b > a) {
+    try { return JSON.parse(t.slice(a, b + 1)); } catch (e) { /* fall through */ }
+  }
+  throw new Error(`${who} returned malformed JSON. Try again, or pick another model.`);
+}
+
+/** Gemini's schema dialect (OBJECT/STRING/…) -> standard JSON Schema with every field required. */
+function toJsonSchema(s) {
+  if (!s || typeof s !== "object") return s;
+  const type = String(s.type || "").toLowerCase();
+  if (type === "object") {
+    const properties = {};
+    for (const [k, v] of Object.entries(s.properties || {})) properties[k] = toJsonSchema(v);
+    return { type: "object", properties, required: Object.keys(properties), additionalProperties: false };
+  }
+  if (type === "array") return { type: "array", items: toJsonSchema(s.items) };
+  const out = { type };
+  if (Array.isArray(s.enum)) out.enum = s.enum.slice();
+  return out;
+}
+
+/** Gemini-shaped contents -> [{ role: "user"|"assistant", content }]. */
+function toChatMessages(contents) {
+  return (contents || []).map((c) => ({
+    role: c.role === "model" ? "assistant" : "user",
+    content: (c.parts || []).map((p) => p.text || "").join(""),
+  }));
+}
+
+/* --- Google Gemini --- */
+
+/**
+ * Gemini 4 rejects temperature/top_p/top_k, so none are sent. `thinking` is low | medium | high;
+ * if the endpoint rejects the thinking config, the call is retried once without it.
+ */
+async function callGemini(cfg, model, req) {
   try {
-    return await geminiOnce(settings, { system, contents, schema, thinking });
+    return await geminiOnce(cfg, model, req);
   } catch (e) {
-    if (thinking && e.status === 400 && /thinking/i.test(e.message)) {
-      return geminiOnce(settings, { system, contents, schema });
+    if (req.thinking && e.status === 400 && /thinking/i.test(e.message)) {
+      return geminiOnce(cfg, model, { ...req, thinking: null });
     }
     throw e;
   }
 }
 
-async function geminiOnce(settings, { system, contents, schema, thinking }) {
+async function geminiOnce(cfg, model, { system, contents, schema, thinking }) {
   const generationConfig = {};
   if (thinking) generationConfig.thinkingConfig = { thinkingLevel: thinking };
   if (schema) {
@@ -301,23 +460,9 @@ async function geminiOnce(settings, { system, contents, schema, thinking }) {
   }
   const body = { contents, generationConfig };
   if (system) body.systemInstruction = { parts: [{ text: system }] };
-  const model = encodeURIComponent((settings.model || DEFAULT_SETTINGS.model).trim());
-  const res = await requestUrl({
-    url: `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-    method: "POST",
-    contentType: "application/json",
-    headers: { "x-goog-api-key": settings.apiKey.trim() },
-    body: JSON.stringify(body),
-    throw: false,
-  });
-  let data = null;
-  try { data = res.json; } catch (e) { data = null; }
-  if (res.status >= 400) {
-    const msg = data && data.error && data.error.message;
-    const err = new Error(`Gemini ${res.status}: ${msg || "request failed"}`);
-    err.status = res.status;
-    throw err;
-  }
+  const data = await postJson(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model.trim())}:generateContent`,
+    { "x-goog-api-key": cfg.apiKey.trim() }, body, "Gemini");
   const cand = data && data.candidates && data.candidates[0];
   const parts = (cand && cand.content && cand.content.parts) || [];
   const text = parts.filter((p) => !p.thought).map((p) => p.text || "").join("").trim();
@@ -325,12 +470,220 @@ async function geminiOnce(settings, { system, contents, schema, thinking }) {
     const why = (cand && cand.finishReason) || (data && data.promptFeedback && data.promptFeedback.blockReason);
     throw new Error(`Gemini returned no text${why ? ` (${why})` : ""}.`);
   }
-  if (!schema) return text;
+  return schema ? parseJsonReply(text, "Gemini") : text;
+}
+
+/* --- OpenAI-compatible: OpenAI and Hermes (Nous Portal) --- */
+
+/**
+ * JSON is asked for with a strict json_schema response_format. Some models behind an
+ * OpenAI-compatible endpoint don't support it, so on a 400 about it the request falls back
+ * to json_object mode, then to plain text, with the schema spelled out in the system prompt.
+ */
+async function callOpenAI(cfg, model, req, def) {
+  const base = String(cfg.baseUrl || def.baseUrl || "").replace(/\/+$/, "");
+  const who = def.short;
+  const headers = { Authorization: `Bearer ${cfg.apiKey.trim()}` };
+  const schema = req.schema ? toJsonSchema(req.schema) : null;
+  const sys = (extra) => ({ role: "system", content: [req.system, extra].filter(Boolean).join("\n\n") });
+  const send = async (format, extra) => {
+    const messages = [sys(extra), ...toChatMessages(req.contents)].filter((x) => x.content);
+    const body = { model, messages };
+    if (format) body.response_format = format;
+    const data = await postJson(`${base}/chat/completions`, headers, body, who);
+    const choice = data && data.choices && data.choices[0];
+    const text = String((choice && choice.message && choice.message.content) || "").trim();
+    if (!text) throw new Error(`${who} returned no text${choice && choice.finish_reason ? ` (${choice.finish_reason})` : ""}.`);
+    return text;
+  };
+  if (!schema) return send(null);
+  const spelled = `Reply with only a JSON object (no prose, no code fences) that matches this JSON Schema:\n${JSON.stringify(schema)}`;
+  const formatProblem = (e) => e.status === 400 && /response_format|json_schema|json_object|structured/i.test(e.message);
   try {
-    return JSON.parse(text);
+    return parseJsonReply(await send({ type: "json_schema", json_schema: { name: "response", strict: true, schema } }), who);
   } catch (e) {
-    throw new Error("Gemini returned malformed JSON. Try again.");
+    if (!formatProblem(e)) throw e;
   }
+  try {
+    return parseJsonReply(await send({ type: "json_object" }, spelled), who);
+  } catch (e) {
+    if (!formatProblem(e)) throw e;
+  }
+  return parseJsonReply(await send(null, spelled), who);
+}
+
+/* --- Anthropic Claude (Messages API) --- */
+
+// Models that support the server-side refusal fallback; on a safety decline the API
+// re-runs the request on a suitable fallback model inside the same call.
+const CLAUDE_FALLBACK_MODELS = /^claude-(opus-5-5|opus-5|fable-5-2|fable-5-1|sonnet-5-5)$/;
+
+/**
+ * Thinking is left at the model's default (adaptive on current models); depth is set with
+ * output_config.effort. JSON uses output_config.format (structured outputs), not forced tool use,
+ * which current models reject.
+ */
+async function callAnthropic(cfg, model, req) {
+  const headers = { "x-api-key": cfg.apiKey.trim(), "anthropic-version": "2026-10-21" };
+  const output = {};
+  if (req.thinking) output.effort = req.thinking; // low | medium | high
+  if (req.schema) output.format = { type: "json_schema", schema: toJsonSchema(req.schema) };
+  const body = { model, max_tokens: 16000, messages: toChatMessages(req.contents) };
+  if (req.system) body.system = req.system;
+  if (Object.keys(output).length) body.output_config = output;
+  if (CLAUDE_FALLBACK_MODELS.test(model)) {
+    headers["anthropic-beta"] = "server-side-fallback-2026-07-01";
+    body.fallbacks = "default";
+  }
+  let data;
+  try {
+    data = await postJson("https://api.anthropic.com/v1/messages", headers, body, "Claude");
+  } catch (e) {
+    // Older models without effort or fallbacks: retry once without the parameter it names.
+    if (e.status !== 400 || !/effort|fallback/i.test(e.message)) throw e;
+    delete body.fallbacks;
+    delete headers["anthropic-beta"];
+    if (/effort/i.test(e.message) && body.output_config) {
+      delete body.output_config.effort;
+      if (!Object.keys(body.output_config).length) delete body.output_config;
+    }
+    data = await postJson("https://api.anthropic.com/v1/messages", headers, body, "Claude");
+  }
+  if (data.stop_reason === "refusal") {
+    const why = data.stop_details && (data.stop_details.explanation || data.stop_details.category);
+    throw new Error(`Claude declined this request${why ? ` (${why})` : ""}. Try another model.`);
+  }
+  const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text || "").join("").trim();
+  if (data.stop_reason === "max_tokens") throw new Error("Claude's reply was cut off (max_tokens). Try again.");
+  if (!text) throw new Error(`Claude returned no text${data.stop_reason ? ` (${data.stop_reason})` : ""}.`);
+  return req.schema ? parseJsonReply(text, "Claude") : text;
+}
+
+/* ---------------- people in the news (persona comparisons) ---------------- */
+/*
+ * Before comparing a day with a person, check whether they were alive on that date
+ * (Wikidata: birth P569 / death P570 of the best-matching human) and, if so, fetch the
+ * headlines about them published that day (Google News RSS search). Only the person's
+ * name and the date are sent; no journal text. Both services are free and keyless.
+ */
+const NEWS_UA = { "User-Agent": "JournalScrollAssistant (Obsidian plugin)" };
+const personFacts = new Map(); // lower-cased name -> { found, label, born, died } (per session)
+
+async function getJson(url) {
+  const res = await requestUrl({ url, method: "GET", headers: NEWS_UA, throw: false });
+  if (res.status >= 400) throw new Error(`${res.status} from ${new URL(url).host}`);
+  return res.json;
+}
+
+/** Wikidata time "+1971-06-28T00:00:00Z" -> local Date (year-only values become 1 Jan). */
+function wikidataDate(claims, prop) {
+  const c = (claims[prop] || []).find((x) => x.mainsnak && x.mainsnak.datavalue);
+  const m = c && /^([+-]\d+)-(\d{2})-(\d{2})/.exec(c.mainsnak.datavalue.value.time || "");
+  return m ? new Date(+m[1], Math.max(0, +m[2] - 1), Math.max(1, +m[3])) : null;
+}
+
+/** The best-matching human on Wikidata for a name, cached for the session. */
+async function lookupPerson(name) {
+  const key = name.trim().toLowerCase();
+  if (personFacts.has(key)) return personFacts.get(key);
+  const found = await getJson("https://www.wikidata.org/w/api.php?action=wbsearchentities&format=json"
+    + `&language=en&type=item&limit=5&search=${encodeURIComponent(name)}`);
+  const ids = ((found && found.search) || []).map((x) => x.id);
+  let facts = { found: false };
+  if (ids.length) {
+    const data = await getJson("https://www.wikidata.org/w/api.php?action=wbgetentities&format=json"
+      + `&props=claims|labels&languages=en&ids=${ids.join("|")}`);
+    const human = ids.map((id) => data.entities[id]).find((e) => e && e.claims
+      && (e.claims.P31 || []).some((c) => c.mainsnak.datavalue && c.mainsnak.datavalue.value.id === "Q5"));
+    if (human) {
+      facts = {
+        found: true,
+        label: (human.labels && human.labels.en && human.labels.en.value) || name,
+        born: wikidataDate(human.claims, "P569"),
+        died: wikidataDate(human.claims, "P570"),
+      };
+    }
+  }
+  personFacts.set(key, facts);
+  return facts;
+}
+
+function decodeXml(s) {
+  return String(s || "").replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#39;|&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n)).replace(/&amp;/g, "&").trim();
+}
+
+function isoDay(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/**
+ * Headlines about `name` published on `date` (local), or by noon the next day, when news
+ * about a day often lands. Newest last, at most `max`. [{ title, source, link, published }]
+ */
+async function newsOnDay(name, date, max = 10) {
+  const day = (n) => new Date(date.getFullYear(), date.getMonth(), date.getDate() + n);
+  const q = `"${name}" after:${isoDay(day(-1))} before:${isoDay(day(2))}`;
+  const res = await requestUrl({
+    url: `https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q=${encodeURIComponent(q)}`,
+    method: "GET", headers: NEWS_UA, throw: false,
+  });
+  if (res.status >= 400) throw new Error(`${res.status} from news.google.com`);
+  const from = day(0).getTime(), to = day(1).getTime() + 12 * 3600 * 1000;
+  const items = [];
+  for (const m of String(res.text || "").matchAll(/<item>([\s\S]*?)<\/item>/g)) {
+    const tag = (t) => decodeXml((m[1].match(new RegExp(`<${t}[^>]*>([\\s\\S]*?)</${t}>`)) || [])[1]);
+    const published = new Date(tag("pubDate"));
+    if (!(published.getTime() >= from && published.getTime() < to)) continue;
+    const source = tag("source");
+    let title = tag("title");
+    if (source && title.endsWith(` - ${source}`)) title = title.slice(0, -(source.length + 3));
+    items.push({ title, source, link: tag("link"), published });
+  }
+  // Same story from several outlets: keep the first of each title.
+  const seen = new Set();
+  return items.filter((x) => !seen.has(x.title.toLowerCase()) && seen.add(x.title.toLowerCase()))
+    .sort((a, b) => a.published - b.published).slice(0, max);
+}
+
+/**
+ * { alive, label, items } for a person on a date. alive is null when the name isn't a known
+ * person on Wikidata (then no news is fetched: a made-up or private name shouldn't be searched).
+ */
+async function personOnDay(name, date) {
+  const p = await lookupPerson(name);
+  if (!p.found) return { alive: null, label: name, items: [] };
+  const alive = (!p.born || p.born <= date) && (!p.died || p.died > date);
+  return { alive, label: p.label, items: alive ? await newsOnDay(p.label, date) : [] };
+}
+
+/** Model ids a provider offers right now, for the suggestions in settings. */
+async function fetchProviderModels(def, cfg) {
+  const key = String(cfg.apiKey || "").trim();
+  if (!key) throw new Error("Add the API key first.");
+  const get = async (url, headers) => {
+    const res = await requestUrl({ url, method: "GET", headers, throw: false });
+    if (res.status >= 400) {
+      const e = res.json && res.json.error;
+      throw new Error(`${res.status}: ${(e && (e.message || e)) || "request failed"}`);
+    }
+    return res.json;
+  };
+  if (def.kind === "gemini") {
+    const data = await get("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", { "x-goog-api-key": key });
+    return (data.models || [])
+      .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"))
+      .map((m) => String(m.name || "").replace(/^models\//, "")).filter(Boolean);
+  }
+  if (def.kind === "anthropic") {
+    const data = await get("https://api.anthropic.com/v1/models?limit=100",
+      { "x-api-key": key, "anthropic-version": "2026-10-21" });
+    return (data.data || []).map((m) => m.id).filter(Boolean);
+  }
+  const base = String(cfg.baseUrl || def.baseUrl || "").replace(/\/+$/, "");
+  const data = await get(`${base}/models`, { Authorization: `Bearer ${key}` });
+  return (data.data || []).map((m) => m.id).filter(Boolean).sort();
 }
 
 const TITLE_SCHEMA = {
@@ -389,6 +742,58 @@ class MonthPickerModal extends SuggestModal {
   }
 }
 
+/* ---------------- day picker (compare with another day) ---------------- */
+
+/** Pick another journal day; entries: [{ file, date }], already ordered newest first. */
+class DayPickerModal extends SuggestModal {
+  constructor(app, placeholder, entries, titleOf, onChoose) {
+    super(app);
+    this.entries = entries;
+    this.titleOf = titleOf;
+    this.onChoose = onChoose;
+    this.setPlaceholder(placeholder);
+  }
+
+  getSuggestions(query) {
+    const q = query.trim().toLowerCase();
+    if (!q) return this.entries;
+    return this.entries.filter((e) => `${longDate(e.date)} ${this.titleOf(e)}`.toLowerCase().includes(q));
+  }
+
+  renderSuggestion(e, el) {
+    el.createDiv({ text: longDate(e.date) });
+    const title = this.titleOf(e);
+    if (title) el.createEl("small", { cls: "jsa-pick-note", text: title });
+  }
+
+  onChooseSuggestion(e) {
+    this.onChoose(e);
+  }
+}
+
+/**
+ * Is this plausibly a person's name ("Elon Musk", "Marie Curie", "A. P. J. Abdul Kalam")?
+ * No digits, no question, at most 6 words, and not a command like "retry …" or "compare …".
+ */
+function looksLikeName(text) {
+  const t = String(text || "").trim();
+  if (!t || /[\d?!:;\n]/.test(t)) return false;
+  const words = t.split(/\s+/);
+  if (words.length > 6) return false;
+  return !/^(retry|redo|again|compare|summari[sz]e|regenerate|what|why|how|when|can|could|please|tell|show|give)\b/i.test(t);
+}
+
+/** "a month earlier", "2 years earlier", "3 months later" — how far `other` is from `focus`. */
+function describeGap(focus, other) {
+  const months = (other.getFullYear() - focus.getFullYear()) * 12 + (other.getMonth() - focus.getMonth());
+  const n = Math.abs(months);
+  const dir = months < 0 ? "earlier" : "later";
+  if (n && n % 12 === 0) return n === 12 ? `a year ${dir}` : `${n / 12} years ${dir}`;
+  if (n) return n === 1 ? `a month ${dir}` : `${n} months ${dir}`;
+  const days = Math.round((other - focus) / 86400000);
+  return `${Math.abs(days)} day${Math.abs(days) === 1 ? "" : "s"} ${days < 0 ? "earlier" : "later"}`;
+}
+
 /* ---------------- the panel inside a Journal Scroll view ---------------- */
 
 class AssistantPanel extends Component {
@@ -402,6 +807,7 @@ class AssistantPanel extends Component {
     this.chatSource = "";     // note path for resolving links in replies
     this.chatContext = null;  // async () => journal text the chat sees
     this.awaitingPersona = false;
+    this.personaEntry = null; // the day "Someone else…" was asked from
     this.busy = false;
   }
 
@@ -415,6 +821,9 @@ class AssistantPanel extends Component {
     this.panel = host.createDiv({ cls: "jsa-panel is-hidden" });
     const head = this.panel.createDiv({ cls: "jsa-head" });
     this.titleEl = head.createDiv({ cls: "jsa-head-title", text: "Journal assistant" });
+    // Which model answers: switchable at any time, grouped by provider.
+    this.modelSelects = new Set();
+    head.appendChild(this.buildModelSelect("is-header"));
     const ideas = head.createEl("button", { cls: "jsa-icon-btn", attr: { "aria-label": "Questions to ask" } });
     setIcon(ideas, "lightbulb");
     this.registerDomEvent(ideas, "click", () => this.showSuggestions());
@@ -467,6 +876,10 @@ class AssistantPanel extends Component {
   hide() {
     this.panel.addClass("is-hidden");
     this.fab.removeClass("is-open");
+    // A pending "type a name" prompt must not outlive the panel and swallow a later message.
+    this.awaitingPersona = false;
+    this.personaEntry = null;
+    this.input.setAttr("placeholder", "Ask about this day…");
   }
 
   /* ----- journal access ----- */
@@ -541,6 +954,7 @@ class AssistantPanel extends Component {
     menu.addItem((i) => i.setTitle("Compare with someone else…").setIcon("user-plus")
       .onClick(() => this.askPersona()));
     menu.addSeparator();
+    this.fillEverythingItem(menu, (fn) => fn);
     menu.addItem((i) => i.setTitle("Title, highlight and rate this day").setIcon("heading")
       .onClick(() => this.titleDay()));
     menu.addItem((i) => i.setTitle("Title and rate every day this month").setIcon("list-checks")
@@ -564,6 +978,8 @@ class AssistantPanel extends Component {
     const body = el.createDiv({ cls: "jsa-msg-body markdown-rendered" });
     if (role === "user") body.setText(md);
     else await MarkdownRenderer.render(this.app, md, body, sourcePath || "", this);
+    // Every answer says which model wrote it.
+    if (role === "assistant" && this.runModel) el.createDiv({ cls: "jsa-msg-model", text: this.runModel });
     if (copy) {
       const btn = el.createEl("button", { cls: "jsa-copy", attr: { "aria-label": "Copy" } });
       setIcon(btn, "copy");
@@ -582,10 +998,59 @@ class AssistantPanel extends Component {
     return el;
   }
 
-  /** Retry callback for gemini(): show progress in the pending bubble. */
+  /** Retry callback for llm(): show progress in the pending bubble. */
   retrying(wait, base) {
     return (n, status) => wait.setText(`${base} (Google is busy${status === 429 ? " (rate limit)" : ""}, `
       + `retrying ${n} of ${RETRY_DELAYS.length}…)`);
+  }
+
+  /* ----- model picker ----- */
+
+  /** A <select> of every model from switched-on providers, grouped by provider. */
+  buildModelSelect(cls) {
+    const sel = createEl("select", { cls: `dropdown jsa-model-select ${cls || ""}`, attr: { "aria-label": "Model" } });
+    this.fillModelSelect(sel);
+    this.registerDomEvent(sel, "change", () => {
+      if (sel.value === "__settings") {
+        this.fillModelSelect(sel);
+        return this.openSettings();
+      }
+      this.plugin.setActiveModel(sel.value);
+    });
+    this.modelSelects.add(sel);
+    return sel;
+  }
+
+  fillModelSelect(sel) {
+    const s = this.plugin.settings;
+    const models = enabledModels(s);
+    const active = activeModel(s);
+    sel.empty();
+    if (!models.length) sel.createEl("option", { text: "No model set up", value: "" });
+    for (const def of PROVIDERS) {
+      const mine = models.filter((m) => m.pid === def.id);
+      if (!mine.length) continue;
+      const group = sel.createEl("optgroup", { attr: { label: def.label } });
+      for (const m of mine) group.createEl("option", { text: modelLabel(m), value: m.key });
+    }
+    sel.createEl("option", { text: "Set up models…", value: "__settings" });
+    sel.value = active ? active.key : "";
+    sel.setAttr("title", active ? `Answers come from ${active.def.label}: ${active.model}` : "No model set up");
+  }
+
+  refreshModelSelects() {
+    for (const sel of Array.from(this.modelSelects)) {
+      if (!sel.isConnected) this.modelSelects.delete(sel);
+      else this.fillModelSelect(sel);
+    }
+  }
+
+  openSettings() {
+    const setting = this.app.setting;
+    if (setting && setting.open) {
+      setting.open();
+      if (setting.openTabById) setting.openTabById(this.plugin.manifest.id);
+    }
   }
 
   async run(label, fn) {
@@ -595,24 +1060,41 @@ class AssistantPanel extends Component {
     }
     this.busy = true;
     this.show();
-    const wait = this.pending(label);
+    const used = activeModel(this.plugin.settings);
+    this.runModel = modelLabel(used);
+    const wait = this.pending(`${label} · ${this.runModel}`);
     this.onRetry = this.retrying(wait, label);
+    let failed = null;
     try {
       await fn(wait);
     } catch (e) {
-      await this.addMessage("error", `**Something went wrong.** ${e.message || e}`);
+      failed = e;
     } finally {
       wait.remove();
       this.busy = false;
       this.onRetry = null;
+      this.runModel = null;
     }
+    if (!failed) return;
+    // Name the model that failed and offer the same request again, on any model.
+    const el = await this.addMessage("error", `**${modelLabel(used)} failed.** ${failed.message || failed}`);
+    const row = el.createDiv({ cls: "jsa-retry" });
+    row.createSpan({ cls: "jsa-retry-label", text: "Try again with" });
+    row.appendChild(this.buildModelSelect("is-inline"));
+    const btn = row.createEl("button", { cls: "mod-cta jsa-retry-btn", text: "Retry" });
+    setIcon(btn.createSpan({ cls: "jsa-retry-icon" }), "rotate-ccw");
+    this.registerDomEvent(btn, "click", () => {
+      if (this.busy) return new Notice("The assistant is still working on the last request.");
+      row.remove();
+      this.run(label, fn);
+    });
   }
 
   /* ----- chat ----- */
 
   /** Start (or resume) a chat about the day in view, with the days before it as context. */
-  startChat() {
-    const entry = this.focusEntry();
+  startChat(entry) {
+    entry = entry || this.focusEntry();
     if (!entry) return new Notice("No journal entries in this view.");
     this.awaitingPersona = false;
     const key = `day:${entry.file.path}`;
@@ -644,7 +1126,14 @@ class AssistantPanel extends Component {
     if (this.awaitingPersona) {
       this.awaitingPersona = false;
       this.input.setAttr("placeholder", "Ask about this day…");
-      return this.compare(text);
+      const entry = this.personaEntry;
+      this.personaEntry = null;
+      // Only a name is a persona. Anything else (e.g. "retry for 16th Nov", which once got saved
+      // as "Compared with retry for 16th Nov") is a normal chat message, not a comparison.
+      if (looksLikeName(text)) return this.compare(text, entry);
+      await this.addMessage("system", `"${text}" doesn't look like a name, so I didn't compare. `
+        + "Use Compare → Compare with someone else… and type just the person's name.");
+      return;
     }
     if (!this.chatKey) this.startChat();
     if (!this.chatKey) return;
@@ -670,7 +1159,7 @@ class AssistantPanel extends Component {
       this.history.push({ role: "user", parts: [{ text }] });
       let reply;
       try {
-        reply = await gemini(s, { thinking: "medium", system: CHAT_SYSTEM, contents: this.history }, this.onRetry);
+        reply = await llm(s, { thinking: "medium", system: CHAT_SYSTEM, contents: this.history }, this.onRetry);
       } catch (e) {
         this.history.pop();
         if (this.history.length === 2) this.history = []; // reload the journal text on the next try
@@ -783,9 +1272,10 @@ class AssistantPanel extends Component {
     return parts.join("\n\n");
   }
 
-  async askPreset(p) {
+  /** entry: the day the question is about (default: the day in view). */
+  async askPreset(p, entry) {
     if (this.busy) return new Notice("The assistant is still working on the last request.");
-    const entry = this.focusEntry();
+    entry = entry || this.focusEntry();
     if (!entry) return new Notice("No journal entries in this view.");
     const areas = splitList(this.plugin.settings.areas).join(", ");
     const question = p.q.replace("{areas}", areas);
@@ -839,7 +1329,7 @@ class AssistantPanel extends Component {
       generated: new Date().toISOString().slice(0, 10),
       timelines,
       titled_days: titles,
-      model: this.plugin.settings.model,
+      model: modelLabel(activeModel(this.plugin.settings)),
     });
     const note = `---\n${fm}---\n\n# ${p.label}\n\n${reply.trim()}\n\n`
       + `*Generated from ${timelines} monthly timelines and ${titles} day titles. `
@@ -853,24 +1343,387 @@ class AssistantPanel extends Component {
 
   /* ----- compare ----- */
 
-  askPersona() {
+  /** entry: the day to compare (default: the day in view). */
+  askPersona(entry) {
     this.awaitingPersona = true;
+    this.personaEntry = entry || null;
     this.show();
-    this.addMessage("system", "Who should I compare your day with? Type a name.");
+    const day = entry ? `**${fmtDate(entry.date)}**` : "your day";
+    this.addMessage("system", `Who should I compare ${day} with? Type a name.`);
     this.input.setAttr("placeholder", "e.g. Marie Curie");
     this.input.focus();
   }
 
-  async compare(persona) {
-    const entry = this.focusEntry();
+  /** The journal entry for a file, or the day in view when no file is given. */
+  entryFor(file) {
+    if (!file) return this.focusEntry();
+    return this.entries().find((e) => e.file.path === file.path) || null;
+  }
+
+  /** The entry exactly `months` months and `years` years from `entry`, if that date exists and has one. */
+  sameDayAs(entry, months, years) {
+    const d = entry.date;
+    const t = new Date(d.getFullYear() + years, d.getMonth() + months, d.getDate());
+    if (t.getDate() !== d.getDate()) return null; // e.g. 31 Oct -> no 31 Sep
+    return this.entries().find((e) => e.date.getFullYear() === t.getFullYear()
+      && e.date.getMonth() === t.getMonth() && e.date.getDate() === t.getDate()) || null;
+  }
+
+  titleOf(e) {
+    const fm = (this.app.metadataCache.getFileCache(e.file) || {}).frontmatter || {};
+    return typeof fm.title === "string" ? fm.title.trim() : "";
+  }
+
+  /**
+   * The menus behind the action row at the bottom of each day in Journal Scroll:
+   *   chat       chat about this day, and the Reflect questions
+   *   compare    people, the same day in another month or year, and week/month over time
+   *   regenerate this day's title and ratings, everything for this day, or a whole month
+   *   summarize  this month, quarter or year
+   * `onStart` runs once an action is chosen (Journal Scroll closes its day pop-up).
+   * `anchor` is the button, so the menu opens under it.
+   */
+  async openActionMenu(kind, evt, file, onStart, anchor) {
+    const entry = this.entryFor(file);
+    if (!entry) return new Notice("That day isn't in this journal.");
+    const go = (fn) => () => { if (onStart) onStart(); fn(); };
+    const menu = new Menu();
+    const build = {
+      chat: () => this.chatItems(menu, entry, go),
+      compare: () => this.compareItems(menu, entry, go),
+      regenerate: () => this.regenerateItems(menu, entry, go),
+      summarize: () => this.summarizeItems(menu, entry, go),
+    }[kind];
+    if (!build) return;
+    await build();
+    if (anchor && anchor.getBoundingClientRect) {
+      const r = anchor.getBoundingClientRect();
+      menu.showAtPosition({ x: r.left, y: r.bottom + 4 });
+    } else {
+      menu.showAtMouseEvent(evt);
+    }
+  }
+
+  chatItems(menu, entry, go) {
+    menu.addItem((i) => i.setTitle(`Chat about ${fmtDate(entry.date)}`).setIcon("message-circle")
+      .onClick(go(() => this.startChat(entry))));
+    menu.addSeparator();
+    for (const p of PRESETS.filter((x) => x.group === "Reflect")) {
+      menu.addItem((i) => i.setTitle(p.label).setIcon(p.icon).onClick(go(() => this.askPreset(p, entry))));
+    }
+  }
+
+  async regenerateItems(menu, entry, go) {
+    const month = { y: entry.date.getFullYear(), m: entry.date.getMonth() };
+    const label = this.monthLabel(month);
+    this.fillEverythingItem(menu, go);
+    menu.addSeparator();
+    menu.addItem((i) => i.setTitle("This day: title, highlights and life areas").setIcon("heading")
+      .onClick(go(() => this.titleDay(entry))));
+    const saved = await this.savedComparisons(entry);
+    menu.addItem((i) => i.setTitle(saved.length
+      ? `This day: everything (title + ${saved.length} comparison${saved.length === 1 ? "" : "s"})`
+      : "This day: everything").setIcon("refresh-cw")
+      .onClick(go(() => this.regenerateDay(entry))));
+    menu.addSeparator();
+    menu.addItem((i) => i.setTitle(`Title and rate untitled days in ${label}`).setIcon("list-checks")
+      .onClick(go(() => this.titleMonth(month))));
+    menu.addItem((i) => i.setTitle(`Re-rate life areas for every day in ${label}`).setIcon("refresh-ccw")
+      .onClick(go(() => this.titleMonth(month, { rerate: true }))));
+    menu.addItem((i) => i.setTitle("Title, rate or re-rate another month…").setIcon("calendar-search")
+      .onClick(go(() => this.pickTitleMonth())));
+  }
+
+  summarizeItems(menu, entry, go) {
+    const y = entry.date.getFullYear(), m = entry.date.getMonth(), q = Math.floor(m / 3) + 1;
+    menu.addItem((i) => i.setTitle(`This month · ${MONTHS_LONG[m]} ${y}`).setIcon("calendar-range")
+      .onClick(go(() => this.monthTimeline({ y, m }))));
+    menu.addItem((i) => i.setTitle(`This quarter · Q${q} ${y}`).setIcon("calendar-days")
+      .onClick(go(() => this.periodSummary("quarter", entry))));
+    menu.addItem((i) => i.setTitle(`This year · ${y}`).setIcon("calendar-check")
+      .onClick(go(() => this.periodSummary("year", entry))));
+  }
+
+  /** Labels of the comparisons already saved in a day's note, in file order. */
+  async savedComparisons(entry) {
+    return Array.from(readComparisons(await this.app.vault.cachedRead(entry.file)).keys());
+  }
+
+  /** Re-run everything for one day: its title, highlights and ratings, then each saved comparison. */
+  async regenerateDay(entry) {
+    const labels = await this.savedComparisons(entry);
+    await this.titleDay(entry);
+    for (const label of labels) {
+      // Day comparisons are saved as "22 Oct 2026 (a month earlier)"; anything else is a person.
+      const m = /^(\d{1,2}) (\w{3}) (\d{4}) \(/.exec(label);
+      if (m && MONTHS.includes(m[2])) {
+        const date = new Date(+m[3], MONTHS.indexOf(m[2]), +m[1]);
+        const other = this.entries().find((e) => e.date.getTime() === date.getTime());
+        if (other) await this.compareDays(entry, other);
+        else await this.addMessage("system", `Skipped ${label}: that day has no entry any more.`);
+      } else if (looksLikeName(label)) {
+        await this.compare(label, entry);
+      } else {
+        await this.addMessage("system", `Skipped "${label}": it isn't a person's name, so it was saved by mistake.`);
+      }
+    }
+  }
+
+  /** Compare menu items: people, the same day in another month or year, and week/month over time. */
+  compareItems(menu, entry, go) {
+    for (const p of splitList(this.plugin.settings.personas)) {
+      menu.addItem((i) => i.setTitle(`Compare with ${p}`).setIcon("users")
+        .onClick(go(() => this.compare(p, entry))));
+    }
+    menu.addItem((i) => i.setTitle("Compare with someone else…").setIcon("user-plus")
+      .onClick(go(() => this.askPersona(entry))));
+    menu.addSeparator();
+
+    const dayItem = (label, icon, other) => menu.addItem((i) => {
+      i.setTitle(`${label} · ${other ? fmtDate(other.date) : "no entry"}`).setIcon(icon);
+      if (other) i.onClick(go(() => this.compareDays(entry, other)));
+      else i.setDisabled(true);
+    });
+    dayItem("Same day last month", "calendar-minus", this.sameDayAs(entry, -1, 0));
+    dayItem("Same day last year", "history", this.sameDayAs(entry, 0, -1));
+
+    // Every other entry on the same day of the month, newest first: other months and other years.
+    const sameDom = this.entries()
+      .filter((e) => e.date.getDate() === entry.date.getDate() && e.file.path !== entry.file.path)
+      .sort((a, b) => b.date - a.date);
+    menu.addItem((i) => {
+      i.setTitle(sameDom.length ? `Same day in another month or year… (${sameDom.length})`
+        : "Same day in another month or year… (none)").setIcon("calendar-search");
+      if (!sameDom.length) return i.setDisabled(true);
+      i.onClick(() => new DayPickerModal(this.app,
+        `Compare ${fmtDate(entry.date)} with… (type to filter by month, year or title)`,
+        sameDom, (e) => this.titleOf(e), (other) => go(() => this.compareDays(entry, other))()).open());
+    });
+    menu.addSeparator();
+    for (const p of PRESETS.filter((x) => x.group === "Compare over time")) {
+      menu.addItem((i) => i.setTitle(p.label).setIcon(p.icon).onClick(go(() => this.askPreset(p, entry))));
+    }
+  }
+
+  /**
+   * A quarter or a year in review, saved next to the monthly timelines:
+   *   <summaries>/<YYYY>/<YYYY>-Q<n> Summary.md   or   <summaries>/<YYYY>/<YYYY> Year Summary.md
+   * A quarter reads every entry in full. A year is too long for that, so it reads each day's
+   * title and highlights plus any monthly timelines already written for that year.
+   */
+  async periodSummary(kind, entry) {
+    const y = entry.date.getFullYear();
+    const q = Math.floor(entry.date.getMonth() / 3) + 1;
+    const first = kind === "quarter" ? new Date(y, (q - 1) * 3, 1) : new Date(y, 0, 1);
+    const last = kind === "quarter" ? new Date(y, q * 3, 0) : new Date(y, 11, 31);
+    const label = kind === "quarter" ? `Q${q} ${y}` : `${y}`;
+    const list = this.entries().filter((e) => e.date >= first && e.date <= last);
+    this.show();
+    if (!list.length) return this.addMessage("system", `No entries in ${label}.`);
+    await this.addMessage("user", `Summarize ${label}`);
+    await this.run(`Reading ${list.length} entries from ${label}…`, async () => {
+      const parts = [];
+      if (kind === "quarter") {
+        for (const e of list) {
+          const title = this.titleOf(e);
+          parts.push(`### ${longDate(e.date)}${title ? ` — ${title}` : ""}\n${await this.entryText(e.file)}`);
+        }
+      } else {
+        const root = `${this.summariesDir()}/${y}/`;
+        const timelines = this.timelineNotes().filter((f) => f.path.startsWith(root));
+        for (const f of timelines) {
+          let text = await this.app.vault.cachedRead(f);
+          const cache = this.app.metadataCache.getFileCache(f);
+          if (cache && cache.frontmatterPosition) text = text.slice(cache.frontmatterPosition.end.offset);
+          parts.push(`## Monthly timeline: ${f.basename.replace(/ Timeline$/, "")}\n\n`
+            + text.replace(/\n## Titles[\s\S]*$/, "").trim());
+        }
+        const days = list.map((e) => {
+          const fm = (this.app.metadataCache.getFileCache(e.file) || {}).frontmatter || {};
+          const hl = Array.isArray(fm.highlights) ? fm.highlights.filter((h) => typeof h === "string") : [];
+          return `- ${fmtDate(e.date)}${this.titleOf(e) ? ` — ${this.titleOf(e)}` : ""}${hl.length ? `: ${hl.join("; ")}` : ""}`;
+        });
+        parts.push(`## Every day (title and highlights)\n\n${days.join("\n")}`);
+      }
+      const areas = splitList(this.plugin.settings.areas);
+      const md = await llm(this.plugin.settings, {
+        thinking: "high",
+        system: [
+          `You turn ${kind === "quarter" ? "a quarter" : "a year"} of a private daily journal into a review the author will keep.`,
+          "Write Markdown with exactly these sections:",
+          "## In a line — one sentence on what the period was about.",
+          "## Month by month — a short paragraph per month, with the key dates.",
+          "## Highlights — the 5 to 10 moments that defined the period, each with its date.",
+          "## People — who mattered and in what context.",
+          "## Themes — 3 to 6 recurring threads, one line each.",
+          `## Focus — one line each for these areas, on how much attention it got:\n${areaGuide(areas)}`,
+          "## Carry forward — open threads and 3 concrete things to do next.",
+          "Use only what the material says. Do not invent. First person is fine (\"I\"), matching the author.",
+        ].join("\n"),
+        contents: [{ role: "user", parts: [{ text: `Journal for ${label}:\n\n${parts.join("\n\n")}` }] }],
+      }, this.onRetry);
+
+      const s = this.plugin.settings;
+      const folder = normalizePath(`${this.summariesDir()}/${y}`);
+      const path = normalizePath(`${folder}/${kind === "quarter" ? `${y}-Q${q} Summary` : `${y} Year Summary`}.md`);
+      const fm = stringifyYaml({
+        type: kind === "quarter" ? "quarter-summary" : "year-summary",
+        period: kind === "quarter" ? `${y}-Q${q}` : `${y}`,
+        entries: list.length,
+        generated: new Date().toISOString().slice(0, 10),
+        model: modelLabel(activeModel(s)),
+      });
+      const note = `---\n${fm}---\n\n# ${label}\n\n${md.trim()}\n`;
+      await this.plugin.ensureFolder(folder);
+      const existing = this.app.vault.getAbstractFileByPath(path);
+      if (existing instanceof TFile) await this.app.vault.modify(existing, note);
+      else await this.app.vault.create(path, note);
+      await this.addMessage("assistant", `${md.trim()}\n\n*Saved to [[${path.replace(/\.md$/, "")}|${label} Summary]].*`,
+        { sourcePath: path, copy: true });
+    });
+  }
+
+  /** Compare the day in focus with another journal day; saved as a callout in the day in focus. */
+  async compareDays(entry, other) {
+    if (!entry || !other) return;
+    const s = this.plugin.settings;
+    const areas = splitList(s.areas);
+    const times = splitList(s.compareTimes || DEFAULT_SETTINGS.compareTimes);
+    const label = fmtDate(other.date);
+    const gap = describeGap(entry.date, other.date);
+    await this.addMessage("user", `Compare ${fmtDate(entry.date)} with ${label} (${gap})`);
+    await this.run(`Comparing with ${label}…`, async () => {
+      const now = await this.entryText(entry.file);
+      const then = await this.entryText(other.file);
+      if (!now) throw new Error(`${fmtDate(entry.date)} has no journal text to compare.`);
+      if (!then) throw new Error(`${label} has no journal text to compare.`);
+      const res = await llm(s, {
+        thinking: "medium",
+        system: [
+          "You are a candid, encouraging performance coach reading two days from the same person's private journal.",
+          `Compare THE DAY IN FOCUS with THE OTHER DAY (${gap}): how the author's days, habits and priorities changed.`,
+          "Use only what each entry says. Never invent events. If a day is silent on something, say so.",
+          `areas: rate both days on each of these life areas:\n${areaGuide(areas)}`,
+          RATING_SCALE,
+          "",
+          `timeline: an hour-by-hour comparison. Include a row for each of: ${times.join(", ")},`,
+          "plus any other time either entry wrote down. Rows in chronological order; time like \"6 AM\" or \"9:30 AM\".",
+          "then: what the author was doing at that hour on the other day. now: on the day in focus.",
+          "If an entry doesn't say, write exactly \"Not in the journal\". Max 15 words each.",
+          "",
+          "better: what the day in focus did better. slipped: what the other day did better.",
+          "carry_forward: concrete, doable-tomorrow advice drawn from the comparison.",
+          "Speak to the author as \"you\".",
+        ].join("\n"),
+        contents: [{ role: "user", parts: [{ text:
+          `THE DAY IN FOCUS: ${longDate(entry.date)}\n${now}\n\n`
+          + `THE OTHER DAY (${gap}): ${longDate(other.date)}\n${then}` }] }],
+        schema: {
+          type: "OBJECT",
+          properties: {
+            one_line: { type: "STRING" },
+            timeline: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: { time: { type: "STRING" }, then: { type: "STRING" }, now: { type: "STRING" } },
+                required: ["time", "then", "now"],
+              },
+            },
+            better: { type: "ARRAY", items: { type: "STRING" } },
+            slipped: { type: "ARRAY", items: { type: "STRING" } },
+            carry_forward: { type: "ARRAY", items: { type: "STRING" } },
+            areas: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: {
+                  area: { type: "STRING" },
+                  then: { type: "STRING", enum: LEVELS },
+                  now: { type: "STRING", enum: LEVELS },
+                  change: { type: "STRING" },
+                },
+                required: ["area", "then", "now", "change"],
+              },
+            },
+          },
+          required: ["one_line", "timeline", "better", "slipped", "carry_forward", "areas"],
+        },
+      }, this.onRetry);
+
+      const LEVEL = { focused: "▂▄▆ Focused", some: "▂▄ Some", neglected: "▂ Neglected", none: "· Not today" };
+      const lv = (x) => LEVEL[x] || cell(x);
+      const rows = (res.timeline || []).filter((r) => r && r.time)
+        .sort((a, b) => dayOrder(a.time) - dayOrder(b.time));
+      const list = (xs) => (xs && xs.length ? xs.map((x) => `- ${x}`) : ["- Nothing stood out"]);
+      const md = [
+        `**${res.one_line}**`,
+        "",
+        `| Time | ${label} | ${fmtDate(entry.date)} |`,
+        "| --- | --- | --- |",
+        ...rows.map((r) => `| **${cell(r.time)}** | ${cell(r.then)} | ${cell(r.now)} |`),
+        "",
+        `**Better than ${label}**`,
+        ...list(res.better),
+        "",
+        `**Better on ${label}**`,
+        ...list(res.slipped),
+        "",
+        "**Carry forward**",
+        ...list(res.carry_forward),
+        "",
+        `| Area | ${label} | ${fmtDate(entry.date)} | What changed |`,
+        "| --- | --- | --- | --- |",
+        ...(res.areas || []).map((a) => `| ${cell(a.area)} | ${lv(a.then)} | ${lv(a.now)} | ${cell(a.change)} |`),
+      ].join("\n");
+
+      // Same home as people comparisons: a folded callout at the end of the day in focus.
+      const key = `${label} (${gap})`;
+      const callout = `> [!compare]- Compared with ${key}\n${quote(md)}`;
+      await this.app.vault.process(entry.file, (text) => writeComparison(text, key, callout));
+      const focus = this.focusMap((res.areas || []).map((a) => ({ area: a.area, level: a.now })), areas);
+      if (Object.keys(focus).length) await this.plugin.setFrontmatter(entry.file, (fm) => { fm.focus = focus; });
+      await this.addMessage("assistant", `### ${fmtDate(entry.date)} vs ${label}\n\n${md}\n\n`
+        + `*Saved to ${entry.file.basename}.*`, { sourcePath: entry.file.path, copy: true });
+    });
+  }
+
+  async compare(persona, entry) {
+    entry = entry || this.focusEntry();
     if (!entry) return new Notice("No journal entries in this view.");
     const s = this.plugin.settings;
     const areas = splitList(s.areas);
     const times = splitList(s.compareTimes || DEFAULT_SETTINGS.compareTimes);
     await this.addMessage("user", `Compare ${fmtDate(entry.date)} with ${persona}`);
-    await this.run(`Comparing with ${persona}…`, async () => {
+    await this.run(`Comparing with ${persona}…`, async (wait) => {
       const ctx = await this.contextFor(entry, s.contextDays);
-      const res = await gemini(s, {
+
+      // A living person may have been in the news that day: what they actually did beats a typical day.
+      let news = [];
+      if (s.personaNews !== false) {
+        wait.setText(`Checking the news about ${persona} on ${fmtDate(entry.date)}…`);
+        try {
+          news = (await personOnDay(persona, entry.date)).items;
+        } catch (e) {
+          news = []; // no news is fine: the comparison falls back to their usual routine
+        }
+        wait.setText(`Comparing with ${persona}…`);
+      }
+      const newsBlock = news.length
+        ? `\n\nNEWS ABOUT ${persona.toUpperCase()} published on ${longDate(entry.date)} (headlines; some may be `
+          + `about other people or other days):\n${news.map((n, i) => `[${i + 1}] ${n.title} (${n.source})`).join("\n")}`
+        : "";
+      const newsRules = news.length ? [
+        "",
+        `The user message ends with news headlines about ${persona} from that day. If some clearly say what ${persona}`,
+        "did, said or faced on that day, that is their real day: build their timeline and persona_day around it, with",
+        "their usual routine only filling the hours the news doesn't cover. Set from_news on rows the news informs.",
+        "in_the_news: 1 to 4 items, each a one-sentence summary of what the news says about them that day, with ref =",
+        "the headline's [number]. Use only what the headlines say; never invent details beyond them.",
+        "If no headline is clearly about them on that day, return in_the_news as [] and ignore the news entirely.",
+      ] : [];
+
+      const res = await llm(s, {
         thinking: "medium",
         system: [
           "You are a candid, encouraging performance coach.",
@@ -888,10 +1741,11 @@ class AssistantPanel extends Component {
           "me: what the author was doing then, in their own terms and times. If the entry clearly implies it",
           "(e.g. still asleep before a stated wake-up time), say so. If it doesn't say, write exactly \"Not in the journal\".",
           "Never fill a gap with a guess about the author. Max 15 words.",
+          ...newsRules,
           "",
           "Speak to the author as \"you\".",
         ].join("\n"),
-        contents: [{ role: "user", parts: [{ text: `My journal:\n\n${ctx}` }] }],
+        contents: [{ role: "user", parts: [{ text: `My journal:\n\n${ctx}${newsBlock}` }] }],
         schema: {
           type: "OBJECT",
           properties: {
@@ -905,8 +1759,17 @@ class AssistantPanel extends Component {
                   time: { type: "STRING" },
                   persona: { type: "STRING" },
                   me: { type: "STRING" },
+                  from_news: { type: "BOOLEAN" },
                 },
-                required: ["time", "persona", "me"],
+                required: ["time", "persona", "me", "from_news"],
+              },
+            },
+            in_the_news: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: { summary: { type: "STRING" }, ref: { type: "INTEGER" } },
+                required: ["summary", "ref"],
               },
             },
             went_well: { type: "ARRAY", items: { type: "STRING" } },
@@ -924,7 +1787,7 @@ class AssistantPanel extends Component {
               },
             },
           },
-          required: ["one_line", "persona_day", "timeline", "went_well", "be_more_effective", "areas"],
+          required: ["one_line", "persona_day", "timeline", "in_the_news", "went_well", "be_more_effective", "areas"],
         },
       }, this.onRetry);
 
@@ -932,14 +1795,25 @@ class AssistantPanel extends Component {
       const rows = (res.timeline || [])
         .filter((r) => r && r.time)
         .sort((a, b) => dayOrder(a.time) - dayOrder(b.time));
+      // Only items that point at a real headline count; links come from the feed, never from the model.
+      const inNews = (res.in_the_news || [])
+        .map((n) => ({ summary: n && n.summary, item: news[(n && n.ref) - 1] }))
+        .filter((n) => n.summary && n.item);
+      const newsMd = inNews.length ? [
+        `> [!info] 📰 ${persona} in the news on ${fmtDate(entry.date)}`,
+        ...inNews.map(({ summary, item }) => `> - ${summary} ([${item.source || "source"}](${item.link}))`),
+        "",
+      ] : [];
+      const mark = (r) => (inNews.length && r.from_news ? "📰 " : "");
       const md = [
         `**${res.one_line}**`,
         "",
-        `| Time | ${cell(persona)} | You |`,
+        ...newsMd,
+        `| Time | ${cell(persona)}${inNews.length ? " (📰 = from the news)" : ""} | You |`,
         "| --- | --- | --- |",
-        ...rows.map((r) => `| **${cell(r.time)}** | ${cell(r.persona)} | ${cell(r.me)} |`),
+        ...rows.map((r) => `| **${cell(r.time)}** | ${mark(r)}${cell(r.persona)} | ${cell(r.me)} |`),
         "",
-        `**${persona}'s day in short:** ${res.persona_day}`,
+        `**${persona}'s day ${inNews.length ? "that day" : "in short"}:** ${res.persona_day}`,
         "",
         "**What went well**",
         ...(res.went_well || []).map((x) => `- ${x}`),
@@ -975,7 +1849,7 @@ class AssistantPanel extends Component {
     const text = await this.entryText(entry.file);
     if (!text) return null;
     const areas = splitList(this.plugin.settings.areas);
-    const res = await gemini(this.plugin.settings, {
+    const res = await llm(this.plugin.settings, {
       thinking: "low",
       system: `${TITLE_SYSTEM}\nLife areas:\n${areaGuide(areas)}`,
       contents: [{ role: "user", parts: [{ text: `Journal entry for ${longDate(entry.date)}:\n\n${text}` }] }],
@@ -985,16 +1859,21 @@ class AssistantPanel extends Component {
     const highlights = (res.highlights || []).map((h) => String(h).trim()).filter(Boolean).slice(0, 5);
     const focus = this.focusMap(res.areas, areas);
     if (!title) return null;
-    const keep = !overwrite && this.hasTitle(entry);
+    // Without overwrite, only what's missing is written: a title or highlights already there are kept.
+    const keepTitle = !overwrite && this.hasTitle(entry);
+    const keepHighlights = !overwrite && this.hasHighlights(entry);
     await this.plugin.setFrontmatter(entry.file, (fm) => {
-      if (!keep) {
-        fm.title = title;
-        fm.highlights = highlights;
-      }
+      if (!keepTitle) fm.title = title;
+      if (!keepHighlights) fm.highlights = highlights;
       if (Object.keys(focus).length) fm.focus = focus;
     });
     const fm = (this.app.metadataCache.getFileCache(entry.file) || {}).frontmatter || {};
-    return { title: keep ? String(fm.title) : title, highlights: keep ? [] : highlights, focus, kept: keep };
+    return {
+      title: keepTitle ? String(fm.title) : title,
+      highlights: keepHighlights ? [] : highlights,
+      focus,
+      kept: keepTitle && keepHighlights,
+    };
   }
 
   /** [{area, level}] from Gemini -> { Area: level } in the order of the settings' life areas. */
@@ -1009,14 +1888,41 @@ class AssistantPanel extends Component {
     return out;
   }
 
+  /** Rated on exactly the current life areas (a day rated on old areas, e.g. Self-realization, isn't). */
   hasFocus(e) {
     const fm = (this.app.metadataCache.getFileCache(e.file) || {}).frontmatter;
-    return !!(fm && fm.focus && typeof fm.focus === "object" && Object.keys(fm.focus).length);
+    const focus = fm && fm.focus;
+    if (!focus || typeof focus !== "object" || Array.isArray(focus)) return false;
+    const have = new Set(Object.keys(focus).map((k) => k.toLowerCase()));
+    const want = splitList(this.plugin.settings.areas).map((a) => a.toLowerCase());
+    return want.length === have.size && want.every((a) => have.has(a));
   }
 
-  /** A day the batch should process: no title yet, or no life-area ratings yet. */
+  hasHighlights(e) {
+    const fm = (this.app.metadataCache.getFileCache(e.file) || {}).frontmatter;
+    const h = fm && fm.highlights;
+    return Array.isArray(h) ? h.some((x) => typeof x === "string" && x.trim()) : typeof h === "string" && !!h.trim();
+  }
+
+  /** A day the batch should process: missing a title, highlights, or ratings on the current life areas. */
   needsWork(e) {
-    return !this.hasTitle(e) || !this.hasFocus(e);
+    return !this.hasTitle(e) || !this.hasHighlights(e) || !this.hasFocus(e);
+  }
+
+  /** The one-button catch-up: title, highlights and life areas for every day in the journal that lacks any. */
+  fillEverything() {
+    return this.titleMonth("all");
+  }
+
+  /** "Fill in everything missing (N days)", or a disabled "Nothing missing" when the journal is complete. */
+  fillEverythingItem(menu, go) {
+    const n = this.entries().filter((e) => this.needsWork(e)).length;
+    menu.addItem((i) => {
+      i.setTitle(n ? `Fill in everything missing (${n} day${n === 1 ? "" : "s"})` : "Nothing missing in the journal")
+        .setIcon("wand-sparkles");
+      if (n) i.onClick(go(() => this.fillEverything()));
+      else i.setDisabled(true);
+    });
   }
 
   focusLine(focus) {
@@ -1024,8 +1930,8 @@ class AssistantPanel extends Component {
     return Object.entries(focus || {}).map(([a, l]) => `${DOT[l] || ""} ${a}`).join(" · ");
   }
 
-  async titleDay() {
-    const entry = this.focusEntry();
+  async titleDay(entry) {
+    entry = entry || this.focusEntry();
     if (!entry) return new Notice("No journal entries in this view.");
     await this.run(`Titling ${fmtDate(entry.date)}…`, async () => {
       const r = await this.generateTitle(entry);
@@ -1108,44 +2014,62 @@ class AssistantPanel extends Component {
     const todo = rerate ? pool : pool.filter((e) => this.needsWork(e));
     this.show();
     if (!pool.length) return this.addMessage("system", `No entries in ${scope}.`);
-    if (!todo.length) return this.addMessage("system", `Every entry in ${scope} already has a title and life-area ratings.`);
-    const verb = rerate ? "Re-rate" : "Title and rate";
+    if (!todo.length) {
+      return this.addMessage("system", `Nothing missing: every entry in ${scope} has a title, highlights and ratings `
+        + `on ${splitList(this.plugin.settings.areas).join(", ")}.`);
+    }
+    const verb = rerate ? "Re-rate" : "Fill in title, highlights and life areas for";
     await this.addMessage("user", `${verb} ${todo.length} day${todo.length === 1 ? "" : "s"} in ${scope}`);
     let stop = false;
-    await this.run(`Titling ${todo.length} entries in ${scope}…`, async (wait) => {
+    await this.run(`Working through ${todo.length} entries in ${scope}…`, async (wait) => {
       // Long batches can be stopped; titles written so far are kept (they're already in the notes).
       const stopBtn = todo.length > 3 ? this.messagesEl.createEl("button", { cls: "jsa-stop", text: "Stop" }) : null;
       if (stopBtn) this.registerDomEvent(stopBtn, "click", () => {
         stop = true;
-        stopBtn.setText("Stopping after this one…");
+        stopBtn.setText("Stopping after the days in progress…");
         stopBtn.disabled = true;
       });
-      const lines = [];
-      let done = 0;
-      try {
-        for (const [i, e] of todo.entries()) {
-          if (stop) break;
-          const label = `Titling ${fmtDate(e.date)} (${i + 1} of ${todo.length})…`;
-          wait.setText(label);
-          this.onRetry = this.retrying(wait, label);
+      // Three days at a time; results are listed in date order at the end, whatever order they finish in.
+      const lines = new Array(todo.length).fill(null);
+      let done = 0, failed = 0, started = 0, finished = 0, badKey = false;
+      const progress = () => {
+        const label = `${verb === "Re-rate" ? "Re-rating" : "Filling in"} ${scope}: ${finished} of ${todo.length} done`
+          + (failed ? `, ${failed} failed` : "") + "…";
+        wait.setText(label);
+        this.onRetry = this.retrying(wait, label);
+      };
+      const worker = async () => {
+        while (!stop && !badKey && started < todo.length) {
+          const i = started++;
+          const e = todo[i];
           try {
+            // Never overwrite: a title or highlights already there are kept; ratings are (re)written.
             const r = await this.generateTitle(e, { overwrite: false });
-            lines.push(r ? `- **${fmtDate(e.date)}** — ${r.title}${r.kept ? " (rated)" : ""}  ${this.focusLine(r.focus)}`
-              : `- ${fmtDate(e.date)} — skipped (empty)`);
+            lines[i] = r ? `- **${fmtDate(e.date)}** — ${r.title}${r.kept ? " (rated)" : ""}  ${this.focusLine(r.focus)}`
+              : `- ${fmtDate(e.date)} — skipped (empty)`;
             if (r) done++;
           } catch (err) {
-            lines.push(`- ${fmtDate(e.date)} — failed: ${err.message || err}`);
-            if (/^Gemini 4(01|03)/.test(err.message || "")) break; // bad key: stop
-            await sleep(4000); // likely rate-limited; back off
+            failed++;
+            lines[i] = `- ${fmtDate(e.date)} — failed: ${err.message || err}`;
+            if (/^\S+ 4(01|03)\b/.test(err.message || "")) badKey = true; // bad key (any provider): stop
+            else await sleep(4000); // likely rate-limited; back off
           }
-          await sleep(400);
+          finished++;
+          progress();
+          await sleep(150);
         }
+      };
+      progress();
+      try {
+        await Promise.all([worker(), worker(), worker()]);
       } finally {
         if (stopBtn) stopBtn.remove();
       }
-      const head = stop ? `**${scope}: stopped after ${done} of ${todo.length}**` : `**${scope}: ${done} titled**`;
+      const head = stop || badKey ? `**${scope}: stopped after ${done} of ${todo.length}**`
+        : `**${scope}: ${done} filled in${failed ? `, ${failed} failed (run it again to retry just those)` : ""}**`;
       // Keep the summary readable for whole-journal runs.
-      const shown = lines.length > 40 ? [...lines.slice(0, 40), `- …and ${lines.length - 40} more`] : lines;
+      const ran = lines.filter(Boolean); // days never started (after Stop) aren't listed
+      const shown = ran.length > 40 ? [...ran.slice(0, 40), `- …and ${ran.length - 40} more`] : ran;
       await this.addMessage("assistant", `${head}\n\n${shown.join("\n")}`);
     });
   }
@@ -1183,7 +2107,7 @@ class AssistantPanel extends Component {
         parts.push(`### ${longDate(e.date)}${title ? ` — ${title}` : ""}\n${await this.entryText(e.file)}`);
       }
       const areas = splitList(this.plugin.settings.areas);
-      const md = await gemini(this.plugin.settings, {
+      const md = await llm(this.plugin.settings, {
         thinking: "high",
         system: [
           "You turn a month of private daily journal entries into a timeline the author will keep.",
@@ -1206,7 +2130,7 @@ class AssistantPanel extends Component {
         month: `${y}-${String(m + 1).padStart(2, "0")}`,
         entries: list.length,
         generated: new Date().toISOString().slice(0, 10),
-        model: s.model,
+        model: modelLabel(activeModel(s)),
       });
       const note = `---\n${fm}---\n\n# ${month}\n\n${md.trim()}\n\n## Titles\n\n${titles.join("\n")}\n`;
       await this.plugin.ensureFolder(folder);
@@ -1229,11 +2153,7 @@ class JournalScrollAssistant extends Plugin {
       this.settings.areas = DEFAULT_SETTINGS.areas;
       await this.saveSettings();
     }
-    // Gemini 2.x is being retired (2.5 Flash is rerouted to 3.5 Flash-Lite on 1 Dec 2026).
-    if (/^gemini-2[.-]/.test(this.settings.model || "")) {
-      this.settings.model = DEFAULT_SETTINGS.model;
-      await this.saveSettings();
-    }
+    if (this.migrateProviders()) await this.saveSettings();
     this.panels = new Map(); // view -> AssistantPanel
     this.addSettingTab(new AssistantSettingTab(this.app, this));
 
@@ -1252,6 +2172,16 @@ class JournalScrollAssistant extends Plugin {
       },
     });
     this.addCommand({
+      id: "fill-everything",
+      name: "Fill in everything missing (titles, highlights, life areas) across the journal",
+      checkCallback: (checking) => {
+        const panel = this.activePanel();
+        if (!panel) return false;
+        if (!checking) panel.fillEverything();
+        return true;
+      },
+    });
+    this.addCommand({
       id: "title-day",
       name: "Title and highlight the day in view",
       checkCallback: (checking) => {
@@ -1266,6 +2196,68 @@ class JournalScrollAssistant extends Plugin {
   onunload() {
     for (const panel of this.panels.values()) panel.unload();
     this.panels.clear();
+  }
+
+  /**
+   * Give every provider a config block, and carry the old single-Gemini settings
+   * ({ apiKey, model }) over into providers.gemini. Returns true if anything changed.
+   */
+  migrateProviders() {
+    const s = this.settings;
+    let changed = false;
+    // Never mutate DEFAULT_SETTINGS.providers, which Object.assign hands over when nothing is saved yet.
+    s.providers = s.providers && typeof s.providers === "object" && s.providers !== DEFAULT_SETTINGS.providers
+      ? s.providers : {};
+    for (const def of PROVIDERS) {
+      if (s.providers[def.id]) continue;
+      s.providers[def.id] = { enabled: false, apiKey: "", baseUrl: def.baseUrl || "", models: def.defaultModels.slice() };
+      changed = true;
+    }
+    const g = s.providers.gemini;
+    if (typeof s.apiKey === "string" || typeof s.model === "string") {
+      if (s.apiKey && !g.apiKey) {
+        g.apiKey = s.apiKey;
+        g.enabled = true;
+      }
+      if (s.model) {
+        g.models = [s.model].concat(g.models.filter((m) => m !== s.model));
+        if (!s.activeModel) s.activeModel = modelKey("gemini", s.model);
+      }
+      delete s.apiKey;
+      delete s.model;
+      changed = true;
+    }
+    // Gemini 2.x is being retired (2.5 Flash is rerouted to 3.5 Flash-Lite on 1 Dec 2026).
+    if (g.models.some((m) => /^gemini-2[.-]/.test(m))) {
+      g.models = g.models.filter((m) => !/^gemini-2[.-]/.test(m));
+      if (!g.models.length) g.models = PROVIDERS[0].defaultModels.slice();
+      if (/^gemini::gemini-2[.-]/.test(s.activeModel || "")) s.activeModel = modelKey("gemini", g.models[0]);
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** Switch the model every request uses, from settings or any chat panel, and update every picker. */
+  async setActiveModel(key) {
+    this.settings.activeModel = key;
+    await this.saveSettings();
+    this.refreshModelPickers();
+  }
+
+  refreshModelPickers() {
+    for (const panel of this.panels.values()) panel.refreshModelSelects();
+  }
+
+  /**
+   * Public entry point for the action row at the bottom of each day in Journal Scroll:
+   * app.plugins.plugins["journal-scroll-assistant"]
+   *   .openActionMenu("chat" | "compare" | "regenerate" | "summarize", evt, { view, file, onStart, anchor }).
+   */
+  openActionMenu(kind, evt, { view, file, onStart, anchor } = {}) {
+    this.attachAll();
+    const panel = view && this.panels.get(view);
+    if (!panel) return new Notice("Open the journal in Journal Scroll to use the assistant.");
+    panel.openActionMenu(kind, evt, file, onStart, anchor);
   }
 
   activePanel() {
@@ -1343,84 +2335,539 @@ class JournalScrollAssistant extends Plugin {
   }
 }
 
+/* ---------------- tag input (settings) ---------------- */
+
+/*
+ * People worth comparing a day with: each is known for a well-documented daily routine and
+ * a long-range vision, so Gemini has real material for the hour-by-hour table.
+ * hint = the routine or vision they are known for, shown in the dropdown.
+ */
+const FAMOUS_PEOPLE = [
+  { name: "Elon Musk", hint: "Runs his day in 5-minute blocks · multi-planetary vision" },
+  { name: "Steve Jobs", hint: "Daily mirror question, walking meetings · product taste" },
+  { name: "Jensen Huang", hint: "Long hours, flat team, no 1:1s · accelerated computing" },
+  { name: "Bill Gates", hint: "Think Weeks, ~50 books a year · global health" },
+  { name: "Jeff Bezos", hint: "8 hours' sleep, key meetings at 10 AM · Day 1 mindset" },
+  { name: "Warren Buffett", hint: "Reads 5–6 hours a day · long-term compounding" },
+  { name: "Tim Cook", hint: "Up before 4 AM, gym before work" },
+  { name: "Satya Nadella", hint: "Learn-it-all growth mindset · reads and listens daily" },
+  { name: "Sundar Pichai", hint: "Calm mornings with the news · AI-first vision" },
+  { name: "Demis Hassabis", hint: "A second work shift late at night · AI for science" },
+  { name: "Sam Altman", hint: "Ruthless focus on few priorities · AGI vision" },
+  { name: "Paul Graham", hint: "Maker's schedule, long writing blocks" },
+  { name: "Naval Ravikant", hint: "Reads daily, plays long-term games" },
+  { name: "Jack Dorsey", hint: "Themed days while running two companies" },
+  { name: "Richard Branson", hint: "Up at 5 AM, exercise first" },
+  { name: "Oprah Winfrey", hint: "Meditation and a gratitude journal" },
+  { name: "Barack Obama", hint: "Morning workout, late-night reading and writing" },
+  { name: "Indra Nooyi", hint: "Early starts, relentless preparation" },
+  { name: "Ratan Tata", hint: "Early riser · values-led leadership" },
+  { name: "N. R. Narayana Murthy", hint: "First into the office · discipline above all" },
+  { name: "A. P. J. Abdul Kalam", hint: "Worked late, rose early · vision for India" },
+  { name: "Benjamin Franklin", hint: "Famous hourly schedule · 'What good shall I do this day?'" },
+  { name: "Charles Darwin", hint: "Three 90-minute work blocks and daily walks" },
+  { name: "Marie Curie", hint: "Relentless lab focus · two Nobel Prizes" },
+  { name: "Albert Einstein", hint: "Long sleep, daily walks, thought experiments" },
+  { name: "Nikola Tesla", hint: "Obsessive work hours · visual thinking" },
+  { name: "Richard Feynman", hint: "Protected deep-work time · playful curiosity" },
+  { name: "Leonardo da Vinci", hint: "Notebooks of endless curiosity" },
+  { name: "Winston Churchill", hint: "Mornings working from bed, afternoon nap" },
+  { name: "Mahatma Gandhi", hint: "Daily walks, prayer and spinning · simplicity" },
+  { name: "Marcus Aurelius", hint: "Morning reflection · Meditations" },
+  { name: "Haruki Murakami", hint: "Up at 4 AM, writes 5–6 hours, runs 10 km" },
+  { name: "Maya Angelou", hint: "Wrote daily in a rented hotel room" },
+  { name: "Stephen King", hint: "2,000 words every single day" },
+  { name: "Ernest Hemingway", hint: "Wrote at first light" },
+  { name: "A. R. Rahman", hint: "Composes through the night" },
+  { name: "Kobe Bryant", hint: "4 AM workouts · Mamba mentality" },
+  { name: "Cristiano Ronaldo", hint: "Strict training, sleep and naps" },
+  { name: "Virat Kohli", hint: "Strict fitness and diet discipline" },
+  { name: "Sachin Tendulkar", hint: "Endless practice, quiet discipline" },
+  { name: "Serena Williams", hint: "Training discipline · competitive drive" },
+  { name: "Arnold Schwarzenegger", hint: "Early workouts, written goals" },
+  { name: "Dwayne Johnson", hint: "4 AM workouts, 'clank and bang'" },
+  { name: "Tim Ferriss", hint: "Morning rituals · self-experiments" },
+  { name: "Andrew Huberman", hint: "Morning sunlight, delayed caffeine" },
+];
+
+/** Life areas to pick from; the first six have definitions in AREA_DEFS for consistent ratings. */
+const LIFE_AREA_SUGGESTIONS = [
+  { name: "Family", hint: AREA_DEFS.family },
+  { name: "Networking", hint: AREA_DEFS.networking },
+  { name: "Health", hint: AREA_DEFS.health },
+  { name: "Career", hint: AREA_DEFS.career },
+  { name: "Hobbies", hint: AREA_DEFS.hobbies },
+  { name: "Growth", hint: AREA_DEFS.growth },
+  { name: "Finance", hint: "Rated by name: money, saving, investing, spending" },
+  { name: "Fitness", hint: "Rated by name: workouts, sport, movement" },
+  { name: "Sleep", hint: "Rated by name: hours and quality of sleep" },
+  { name: "Mindfulness", hint: "Rated by name: meditation, calm, presence" },
+  { name: "Spirituality", hint: "Rated by name: faith, prayer, meaning" },
+  { name: "Relationships", hint: "Rated by name: partner and close friendships" },
+  { name: "Learning", hint: "Rated by name: courses, study, new skills" },
+  { name: "Reading", hint: "Rated by name: books and long-form reading" },
+  { name: "Creativity", hint: "Rated by name: writing, art, music, building" },
+  { name: "Community", hint: "Rated by name: giving back, volunteering" },
+  { name: "Home", hint: "Rated by name: chores, home projects, errands" },
+  { name: "Travel", hint: "Rated by name: trips and exploring" },
+  { name: "Fun", hint: "Rated by name: play, rest, leisure" },
+];
+
+/**
+ * Chips + a combobox. The list of options is always one click away:
+ *   - click anywhere in the field, or the ▾ button, to see every option (no typing needed)
+ *   - type to filter the same list; anything not listed can still be added as typed
+ *   - ↑/↓ move, Enter or Tab adds the highlighted option, Esc closes,
+ *     Backspace in an empty field removes the last chip, × on a chip removes it
+ * The list is a popover on document.body with position: fixed, like Obsidian's own menus,
+ * so the settings window's scrolling and stacking can't clip or cover it.
+ * opts: { values, suggestions: [{ name, hint }], placeholder, onChange(values) }
+ */
+class TagInput {
+  constructor(parent, opts) {
+    this.opts = opts;
+    this.values = (opts.values || []).slice();
+    this.active = 0;
+    this.matches = [];
+    this.custom = null;
+    this.open = false;
+
+    this.root = parent.createDiv({ cls: "jsa-tags" });
+    this.field = this.root.createDiv({ cls: "jsa-tags-field" });
+    this.chipsEl = this.field.createDiv({ cls: "jsa-tags-chips" });
+    this.input = createEl("input", {
+      cls: "jsa-tags-input",
+      attr: {
+        type: "text", placeholder: opts.placeholder || "Add…", spellcheck: "false", autocomplete: "off",
+        role: "combobox", "aria-expanded": "false", "aria-autocomplete": "list",
+      },
+    });
+    this.toggleBtn = this.field.createEl("button", {
+      cls: "jsa-tags-toggle", attr: { type: "button", "aria-label": "Show all options", tabindex: "-1" },
+    });
+    setIcon(this.toggleBtn, "chevron-down");
+
+    this.pop = createDiv({ cls: "jsa-tags-pop", attr: { role: "listbox" } });
+    TagInput.live.add(this);
+
+    // Open on any click in the field; the ▾ button toggles.
+    this.field.addEventListener("mousedown", (e) => {
+      if (e.target.closest(".jsa-tag-remove")) return;
+      if (e.target.closest(".jsa-tags-toggle")) {
+        e.preventDefault();
+        if (this.open) this.close();
+        else { this.input.focus(); this.show(); }
+        return;
+      }
+      if (e.target !== this.input) e.preventDefault();
+      this.input.focus();
+      this.show();
+    });
+    this.input.addEventListener("focus", () => this.show());
+    this.input.addEventListener("input", () => { this.active = 0; this.show(); });
+    this.input.addEventListener("keydown", (e) => this.onKey(e));
+    // Close when focus leaves for anything other than the popover.
+    this.input.addEventListener("blur", () => window.setTimeout(() => {
+      if (document.activeElement !== this.input) this.close();
+    }, 120));
+
+    this.onOutside = (e) => {
+      if (!this.root.isConnected) return this.close();
+      if (this.root.contains(e.target) || this.pop.contains(e.target)) return;
+      this.close();
+    };
+    this.onReflow = () => (this.root.isConnected ? this.position() : this.close());
+    this.renderChips();
+  }
+
+  has(name) {
+    return this.values.some((v) => v.toLowerCase() === String(name).toLowerCase());
+  }
+
+  add(name) {
+    name = String(name || "").replace(/,/g, " ").replace(/\s+/g, " ").trim();
+    this.input.value = "";
+    if (name && !this.has(name)) {
+      this.values.push(name);
+      this.changed();
+    } else {
+      this.show();
+    }
+  }
+
+  remove(i) {
+    this.values.splice(i, 1);
+    this.changed();
+  }
+
+  changed() {
+    this.renderChips();
+    this.opts.onChange(this.values.slice());
+    this.input.focus();
+    this.active = 0;
+    this.show(); // keep the list open so several can be picked in a row
+  }
+
+  renderChips() {
+    this.chipsEl.empty();
+    this.values.forEach((v, i) => {
+      const chip = this.chipsEl.createSpan({ cls: "jsa-tag" });
+      chip.createSpan({ cls: "jsa-tag-text", text: v });
+      const x = chip.createEl("button", { cls: "jsa-tag-remove", attr: { type: "button", "aria-label": `Remove ${v}` } });
+      setIcon(x, "x");
+      x.addEventListener("mousedown", (e) => e.preventDefault()); // keep focus in the field
+      x.addEventListener("click", (e) => { e.stopPropagation(); this.remove(i); });
+    });
+    this.chipsEl.appendChild(this.input);
+  }
+
+  /** Options not yet chosen. Empty field: all of them. Typed text: name matches first, then hint matches. */
+  filter() {
+    const q = this.input.value.trim().toLowerCase();
+    const pool = (this.opts.suggestions || []).filter((s) => !this.has(s.name));
+    if (!q) return { q, matches: pool };
+    const words = (s) => s.name.toLowerCase().split(/[\s./_-]+/);
+    const starts = pool.filter((s) => s.name.toLowerCase().startsWith(q) || words(s).some((w) => w.startsWith(q)));
+    const rest = pool.filter((s) => !starts.includes(s)
+      && (s.name.toLowerCase().includes(q) || (s.hint || "").toLowerCase().includes(q)));
+    return { q, matches: starts.concat(rest) };
+  }
+
+  show() {
+    if (!this.root.isConnected) return;
+    const { q, matches } = this.filter();
+    this.matches = matches;
+    const exact = q && (matches.some((m) => m.name.toLowerCase() === q) || this.has(q));
+    this.custom = q && !exact ? this.input.value.trim() : null;
+    const rows = matches.length + (this.custom ? 1 : 0);
+    this.active = rows ? Math.max(0, Math.min(this.active, rows - 1)) : 0;
+
+    this.pop.empty();
+    const total = (this.opts.suggestions || []).filter((s) => !this.has(s.name)).length;
+    this.pop.createDiv({
+      cls: "jsa-tags-pop-head",
+      text: q ? `${matches.length} of ${total} match "${this.input.value.trim()}"`
+        : total ? `${total} to choose from. Type to filter, or add your own.` : "All suggestions added. Type to add your own.",
+    });
+    matches.forEach((m, i) => this.row(i, m.name, m.hint, () => this.add(m.name)));
+    if (this.custom) {
+      const text = this.custom;
+      this.row(matches.length, `Add "${text}"`, matches.length ? "Not in the list: add it as typed" : "No match: add it as typed",
+        () => this.add(text), true);
+    }
+
+    if (!this.open) {
+      document.body.appendChild(this.pop);
+      document.addEventListener("mousedown", this.onOutside, true);
+      window.addEventListener("resize", this.onReflow);
+      window.addEventListener("scroll", this.onReflow, true);
+      this.open = true;
+      this.root.addClass("is-open");
+      this.input.setAttr("aria-expanded", "true");
+    }
+    this.position();
+    const act = this.pop.querySelector(".jsa-tags-option.is-active");
+    if (act) act.scrollIntoView({ block: "nearest" });
+  }
+
+  /** Below the field, or above it when there's more room there. */
+  position() {
+    const r = this.field.getBoundingClientRect();
+    const below = window.innerHeight - r.bottom - 12;
+    const above = r.top - 12;
+    const up = below < 220 && above > below;
+    const max = Math.max(140, Math.min(340, up ? above : below));
+    setCssProps(this.pop, {
+      left: `${Math.round(r.left)}px`,
+      width: `${Math.round(r.width)}px`,
+      top: up ? "auto" : `${Math.round(r.bottom + 4)}px`,
+      bottom: up ? `${Math.round(window.innerHeight - r.top + 4)}px` : "auto",
+      "max-height": `${Math.round(max)}px`,
+    });
+  }
+
+  close() {
+    if (!this.open) return;
+    this.open = false;
+    this.pop.remove();
+    document.removeEventListener("mousedown", this.onOutside, true);
+    window.removeEventListener("resize", this.onReflow);
+    window.removeEventListener("scroll", this.onReflow, true);
+    this.root.removeClass("is-open");
+    this.input.setAttr("aria-expanded", "false");
+  }
+
+  row(i, title, hint, pick, isCustom) {
+    const el = this.pop.createDiv({
+      cls: `jsa-tags-option${i === this.active ? " is-active" : ""}${isCustom ? " is-custom" : ""}`,
+      attr: { role: "option" },
+    });
+    el.createDiv({ cls: "jsa-tags-option-name", text: title });
+    if (hint) el.createDiv({ cls: "jsa-tags-option-hint", text: hint });
+    el.addEventListener("mousedown", (e) => { e.preventDefault(); pick(); });
+    el.addEventListener("mouseenter", () => {
+      this.active = i;
+      this.pop.querySelectorAll(".jsa-tags-option").forEach((o, j) => o.toggleClass("is-active", j === i));
+    });
+  }
+
+  onKey(e) {
+    const rows = this.matches.length + (this.custom ? 1 : 0);
+    const typed = this.input.value.trim();
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!this.open) return this.show();
+      if (!rows) return;
+      this.active = (this.active + (e.key === "ArrowDown" ? 1 : -1) + rows) % rows;
+      this.show();
+    } else if (e.key === "Enter" || e.key === "," || (e.key === "Tab" && this.open && typed)) {
+      if (e.key !== "Enter" && !typed) return;
+      e.preventDefault();
+      if (this.open && this.active < this.matches.length && (typed || e.key === "Enter")) {
+        this.add(this.matches[this.active].name);
+      } else if (typed) {
+        this.add(typed);
+      }
+    } else if (e.key === "Backspace" && !this.input.value && this.values.length) {
+      e.preventDefault();
+      this.remove(this.values.length - 1);
+    } else if (e.key === "Escape" && this.open) {
+      e.preventDefault();
+      e.stopPropagation(); // close the list, not the settings window
+      this.close();
+    } else if (e.key === "Tab") {
+      this.close();
+    }
+  }
+}
+
+/** Obsidian's setCssProps, with a fallback for older builds. */
+function setCssProps(el, props) {
+  if (el.setCssProps) el.setCssProps(props);
+  else for (const k of Object.keys(props)) el.style.setProperty(k, props[k]);
+}
+
+/** Every TagInput made, so the settings tab can close any open list when it redraws or closes. */
+TagInput.live = new Set();
+TagInput.closeAll = () => {
+  for (const t of Array.from(TagInput.live)) {
+    t.close();
+    if (!t.root.isConnected) TagInput.live.delete(t);
+  }
+};
+
 class AssistantSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
+    this.fetched = {}; // provider id -> model ids loaded from the provider this session
+  }
+
+  hide() {
+    TagInput.closeAll();
+  }
+
+  /* ----- models & providers ----- */
+
+  renderModels(containerEl) {
+    const s = this.plugin.settings;
+    new Setting(containerEl).setName("Models").setHeading();
+    containerEl.createEl("p", {
+      cls: "setting-item-description jsa-providers-intro",
+      text: "Switch on any providers you have a key for; several can be on at once. Every model you list "
+        + "appears in the assistant's model picker, grouped by provider, so when one is down you can switch "
+        + "and retry straight from the chat.",
+    });
+
+    const models = enabledModels(s);
+    const active = activeModel(s);
+    new Setting(containerEl)
+      .setName("Model in use")
+      .setDesc(active ? `Requests go to ${active.def.label}: ${active.model}. Also switchable in the chat header.`
+        : "Switch on a provider below and add a model to start.")
+      .addDropdown((d) => {
+        if (!models.length) d.addOption("", "No model set up");
+        for (const m of models) d.addOption(m.key, `${m.def.label} · ${m.model}`);
+        d.setValue(active ? active.key : "").onChange(async (v) => {
+          await this.plugin.setActiveModel(v);
+          this.display();
+        });
+      });
+
+    const list = containerEl.createDiv({ cls: "jsa-providers" });
+    for (const def of PROVIDERS) this.renderProvider(list, def);
+  }
+
+  renderProvider(parent, def) {
+    const s = this.plugin.settings;
+    const cfg = s.providers[def.id];
+    const ready = cfg.enabled && cfg.apiKey && cfg.models.length;
+    const status = !cfg.enabled ? ["Off", "is-off"]
+      : !cfg.apiKey ? ["Needs a key", "is-warn"]
+        : !cfg.models.length ? ["No models", "is-warn"] : ["On", "is-on"];
+    const card = parent.createDiv({ cls: `jsa-provider ${cfg.enabled ? "is-enabled" : ""} ${ready ? "is-ready" : ""}` });
+    const save = async (redraw) => {
+      await this.plugin.saveSettings();
+      this.plugin.refreshModelPickers();
+      if (redraw) this.display();
+    };
+
+    const head = new Setting(card).setName(def.label).setDesc(def.blurb);
+    head.settingEl.addClass("jsa-provider-head");
+    head.nameEl.createSpan({ cls: `jsa-provider-status ${status[1]}`, text: status[0] });
+    head.addToggle((t) => t.setValue(cfg.enabled).setTooltip(cfg.enabled ? "Switch off" : "Switch on")
+      .onChange(async (v) => {
+        cfg.enabled = v;
+        await save(true);
+      }));
+    if (!cfg.enabled) return;
+
+    const body = card.createDiv({ cls: "jsa-provider-body" });
+    new Setting(body)
+      .setName("API key")
+      .addText((t) => {
+        t.inputEl.type = "password";
+        t.inputEl.addClass("jsa-key-input");
+        t.setPlaceholder(def.keyPlaceholder).setValue(cfg.apiKey).onChange(async (v) => {
+          cfg.apiKey = v.trim();
+          await save(false);
+        });
+        this.keyInput = t.inputEl;
+      })
+      .addExtraButton((b) => {
+        const input = this.keyInput;
+        b.setIcon("eye").setTooltip("Show or hide the key").onClick(() => {
+          input.type = input.type === "password" ? "text" : "password";
+        });
+      });
+
+    if (def.kind === "openai") {
+      new Setting(body)
+        .setName("Base URL")
+        .setDesc(`OpenAI-compatible endpoint. Default: ${def.baseUrl}`)
+        .addText((t) => t.setPlaceholder(def.baseUrl).setValue(cfg.baseUrl || def.baseUrl).onChange(async (v) => {
+          cfg.baseUrl = v.trim() || def.baseUrl;
+          await save(false);
+        }));
+    }
+
+    const modelsSetting = new Setting(body)
+      .setName("Models")
+      .setDesc("Each one appears in the chat's model picker. Type to pick a suggestion, or type any model "
+        + "id and press Enter. \"Load models\" fetches everything your key can use.");
+    modelsSetting.settingEl.addClass("jsa-tag-setting");
+    const fetched = (this.fetched[def.id] || []).filter((id) => !def.suggestions.some((x) => x.name === id))
+      .map((id) => ({ name: id, hint: `Available to your ${def.short} key` }));
+    const tags = new TagInput(modelsSetting.controlEl, {
+      values: cfg.models,
+      suggestions: def.suggestions.concat(fetched),
+      placeholder: "Add a model…",
+      onChange: async (vals) => {
+        cfg.models = vals;
+        await save(false);
+      },
+    });
+
+    const result = body.createDiv({ cls: "jsa-provider-result" });
+    const say = (text, cls) => {
+      result.setText(text);
+      result.className = `jsa-provider-result ${cls || ""}`;
+    };
+    new Setting(body)
+      .addButton((b) => b.setButtonText("Load models").setTooltip("Fetch the model list for this key")
+        .onClick(async () => {
+          b.setDisabled(true).setButtonText("Loading…");
+          try {
+            const ids = await fetchProviderModels(def, cfg);
+            this.fetched[def.id] = ids;
+            tags.opts.suggestions = def.suggestions.concat(ids.filter((id) => !def.suggestions.some((x) => x.name === id))
+              .map((id) => ({ name: id, hint: `Available to your ${def.short} key` })));
+            say(`${ids.length} models available. Start typing in Models to add one.`, "is-ok");
+          } catch (e) {
+            say(`Couldn't load models: ${e.message || e}`, "is-error");
+          } finally {
+            b.setDisabled(false).setButtonText("Load models");
+          }
+        }))
+      .addButton((b) => b.setButtonText("Test").setCta().setTooltip("Send a one-line test to the first model")
+        .onClick(async () => {
+          const model = cfg.models[0];
+          if (!model) return say("Add a model first.", "is-error");
+          b.setDisabled(true).setButtonText("Testing…");
+          const t0 = Date.now();
+          try {
+            const reply = await llm(this.plugin.settings, {
+              contents: [{ role: "user", parts: [{ text: "Reply with just the word OK." }] }],
+            }, null, { pid: def.id, model });
+            say(`${model} answered in ${((Date.now() - t0) / 1000).toFixed(1)}s: "${String(reply).slice(0, 60)}"`, "is-ok");
+          } catch (e) {
+            say(`${model} failed: ${e.message || e}`, "is-error");
+          } finally {
+            b.setDisabled(false).setButtonText("Test");
+          }
+        }));
   }
 
   display() {
     const { containerEl } = this;
     const s = this.plugin.settings;
+    TagInput.closeAll(); // a list left open from the last draw would float over nothing
     containerEl.empty();
 
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "Adds an assistant button to Journal Scroll. Entries you ask about are sent to Google's Gemini API. "
+      text: "Adds an assistant to Journal Scroll. Entries you ask about are sent to the model you pick below. "
         + "Everything it writes goes into your notes: titles, highlights and focus levels into each entry's "
-        + "frontmatter, comparisons at the end of the entry, and monthly timelines into the summaries folder. "
-        + "Chats are not saved.",
+        + "frontmatter, comparisons at the end of the entry, and summaries into the summaries folder. "
+        + "Chats are not saved. API keys stay in this plugin's settings, never in your notes.",
+    });
+
+    this.renderModels(containerEl);
+
+    new Setting(containerEl).setName("Journal").setHeading();
+
+    // Both lists are tag inputs: chips you remove with ×, a field that suggests as you type,
+    // and Enter to add anything that isn't suggested. Stored as before, comma-separated.
+    const people = new Setting(containerEl)
+      .setName("People to compare with")
+      .setDesc("Each gets its own item in the Compare menu. Start typing to pick someone known for a "
+        + "great daily routine and a big vision, or type any name and press Enter to add it.");
+    people.settingEl.addClass("jsa-tag-setting");
+    new TagInput(people.controlEl, {
+      values: splitList(s.personas),
+      suggestions: FAMOUS_PEOPLE,
+      placeholder: "Add a person…",
+      onChange: async (vals) => {
+        s.personas = vals.join(", ");
+        await this.plugin.saveSettings();
+      },
     });
 
     new Setting(containerEl)
-      .setName("Gemini API key")
-      .setDesc("From Google AI Studio (aistudio.google.com/apikey). Kept in this plugin's settings, never in your notes.")
-      .addText((t) => {
-        t.inputEl.type = "password";
-        t.setPlaceholder("AIza…").setValue(s.apiKey).onChange(async (v) => {
-          s.apiKey = v.trim();
-          await this.plugin.saveSettings();
-        });
-      });
-
-    new Setting(containerEl)
-      .setName("Model")
-      .setDesc("Flash-Lite is cheapest and fine for titles and quick questions. Hydrogen gives more "
-        + "thoughtful comparisons and timelines at about 3-5x the cost. Carbon is the most capable. "
-        + "Pick Custom to type any other Gemini model code.")
-      .addDropdown((d) => {
-        for (const [id, label] of MODELS) d.addOption(id, label);
-        d.addOption("custom", "Custom…");
-        const known = MODELS.some(([id]) => id === s.model);
-        d.setValue(known && !this.customModel ? s.model : "custom").onChange(async (v) => {
-          this.customModel = v === "custom";
-          if (this.customModel) {
-            this.display();
-            return;
-          }
-          s.model = v;
-          await this.plugin.saveSettings();
-          this.display();
-        });
-      });
-
-    if (!MODELS.some(([id]) => id === s.model)) this.customModel = true;
-    if (this.customModel) {
-      new Setting(containerEl)
-        .setName("Custom model code")
-        .setDesc("Exact model code from Google AI Studio, e.g. gemini-3.5-flash-lite.")
-        .addText((t) => t.setPlaceholder(DEFAULT_SETTINGS.model).setValue(s.model).onChange(async (v) => {
-          s.model = v.trim() || DEFAULT_SETTINGS.model;
-          await this.plugin.saveSettings();
-        }));
-    }
-
-    new Setting(containerEl)
-      .setName("People to compare with")
-      .setDesc("Comma-separated. Each gets its own item in the assistant menu.")
-      .addText((t) => t.setValue(s.personas).onChange(async (v) => {
-        s.personas = v;
+      .setName("Use the news about living people")
+      .setDesc("When you compare a day with someone who was alive then, check the news about them from that "
+        + "day. If there's any, the comparison highlights it and builds their day around what they actually "
+        + "did. Only the person's name and the date are looked up (Wikidata, Google News), never your journal.")
+      .addToggle((t) => t.setValue(s.personaNews !== false).onChange(async (v) => {
+        s.personaNews = v;
         await this.plugin.saveSettings();
       }));
 
-    new Setting(containerEl)
+    const areasSetting = new Setting(containerEl)
       .setName("Life areas")
-      .setDesc("Comma-separated areas rated on each day, in comparisons and in monthly timelines. "
-        + "After changing them, use \"Re-rate life areas in a month…\" to update days already rated.")
-      .addText((t) => t.setValue(s.areas).onChange(async (v) => {
-        s.areas = v;
+      .setDesc("Rated on each day, in comparisons and in monthly timelines, in this order. Pick from the "
+        + "suggestions or type your own and press Enter. After changing them, use Regenerate → "
+        + "\"Re-rate life areas\" to update days already rated.");
+    areasSetting.settingEl.addClass("jsa-tag-setting");
+    new TagInput(areasSetting.controlEl, {
+      values: splitList(s.areas),
+      suggestions: LIFE_AREA_SUGGESTIONS,
+      placeholder: "Add a life area…",
+      onChange: async (vals) => {
+        s.areas = vals.join(", ");
         await this.plugin.saveSettings();
-      }));
+      },
+    });
 
     new Setting(containerEl)
       .setName("Comparison times")

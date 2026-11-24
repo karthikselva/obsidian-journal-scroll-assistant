@@ -262,3 +262,336 @@
   align-self: center;
   font-size: var(--font-ui-smaller, 12px);
 }
+
+/* ---------------- Tag input (settings: people, life areas) ---------------- */
+
+/* Give the chips the full row width under the name and description. */
+.jsa-tag-setting {
+  flex-wrap: wrap;
+}
+
+.jsa-tag-setting .setting-item-control {
+  flex: 1 1 100%;
+  justify-content: stretch;
+  margin-top: var(--size-4-2, 8px);
+}
+
+.jsa-tags {
+  position: relative;
+  width: 100%;
+}
+
+.jsa-tags-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  min-height: 38px;
+  padding: 5px 4px 5px 6px;
+  background: var(--background-modifier-form-field);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 8px);
+  cursor: pointer;
+}
+
+.jsa-tags-field:focus-within,
+.jsa-tags.is-open .jsa-tags-field {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 25%, transparent);
+}
+
+.jsa-tags-chips {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* ▾ at the right edge: opens or closes the full list. */
+.jsa-tags-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-s, 4px);
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.jsa-tags-toggle:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.jsa-tags-toggle svg {
+  width: 16px;
+  height: 16px;
+  transition: transform 120ms ease;
+}
+
+.jsa-tags.is-open .jsa-tags-toggle svg {
+  transform: rotate(180deg);
+}
+
+.jsa-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px 2px 10px;
+  font-size: var(--font-ui-small, 13px);
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--text-normal);
+  background: color-mix(in srgb, var(--interactive-accent) 16%, var(--background-secondary));
+  border: 1px solid color-mix(in srgb, var(--interactive-accent) 35%, transparent);
+  border-radius: 999px;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.jsa-tag-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.jsa-tag-remove:hover {
+  color: var(--text-on-accent, #fff);
+  background: var(--color-red, #e5534b);
+}
+
+.jsa-tag-remove svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* The typing field sits after the last chip and takes the rest of the line. */
+.jsa-tags-chips input.jsa-tags-input {
+  flex: 1 0 140px;
+  min-width: 140px;
+  height: 26px;
+  padding: 0 4px;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.jsa-tags-chips input.jsa-tags-input:focus {
+  box-shadow: none;
+}
+
+/* The option list: a popover on <body>, above the settings window (like Obsidian's menus). */
+.jsa-tags-pop {
+  position: fixed;
+  z-index: var(--layer-menu, 65);
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 8px);
+  box-shadow: var(--shadow-l, 0 10px 30px rgba(0, 0, 0, 0.3));
+}
+
+.jsa-tags-pop-head {
+  padding: 4px 10px 6px;
+  font-size: var(--font-ui-smaller, 12px);
+  color: var(--text-faint);
+}
+
+.jsa-tags-option {
+  padding: 6px 10px;
+  border-radius: var(--radius-s, 4px);
+  cursor: pointer;
+}
+
+.jsa-tags-option.is-active {
+  background: var(--background-modifier-hover);
+}
+
+.jsa-tags-option-name {
+  font-size: var(--font-ui-small, 13px);
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.jsa-tags-option-hint {
+  font-size: var(--font-ui-smaller, 12px);
+  color: var(--text-muted);
+}
+
+.jsa-tags-option.is-custom {
+  border-top: 1px solid var(--background-modifier-border);
+  margin-top: 2px;
+}
+
+.jsa-tags-option.is-custom .jsa-tags-option-name {
+  color: var(--text-accent);
+}
+
+/* ---------------- Model picker (chat) ---------------- */
+
+/* In the header, between the title and the icons; the title gives way first. */
+.jsa-head-title {
+  min-width: 0;
+}
+
+select.jsa-model-select {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 55%;
+  height: 26px;
+  padding: 0 24px 0 8px;
+  font-size: var(--font-ui-smaller, 12px);
+  border-radius: var(--radius-m, 8px);
+  text-overflow: ellipsis;
+}
+
+select.jsa-model-select.is-inline {
+  max-width: 100%;
+  flex: 1 1 160px;
+}
+
+/* Which model wrote an answer. */
+.jsa-msg-model {
+  margin-top: 6px;
+  font-size: var(--font-ui-smaller, 12px);
+  color: var(--text-faint);
+}
+
+/* Under a failed request: Try again with [model ▾] [Retry] */
+.jsa-retry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  color: var(--text-normal);
+}
+
+.jsa-retry-label {
+  font-size: var(--font-ui-smaller, 12px);
+  color: var(--text-muted);
+}
+
+.jsa-retry-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 10px;
+  font-size: var(--font-ui-smaller, 12px);
+}
+
+.jsa-retry-btn {
+  flex-direction: row-reverse; /* icon after the label reads "Retry ↺" */
+}
+
+.jsa-retry-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* ---------------- Providers (settings) ---------------- */
+
+.jsa-providers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-3, 12px);
+  margin: var(--size-4-2, 8px) 0 var(--size-4-6, 24px);
+}
+
+.jsa-provider {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-l, 12px);
+  background: var(--background-primary);
+  overflow: visible; /* the model dropdown must escape the card */
+}
+
+.jsa-provider.is-enabled {
+  border-color: color-mix(in srgb, var(--interactive-accent) 45%, var(--background-modifier-border));
+}
+
+.jsa-provider.is-ready {
+  box-shadow: inset 3px 0 0 var(--color-green, #2ea043);
+}
+
+.jsa-provider .setting-item {
+  padding-left: var(--size-4-4, 16px);
+  padding-right: var(--size-4-4, 16px);
+}
+
+.jsa-provider-head {
+  border-top: 0;
+}
+
+.jsa-provider-head .setting-item-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.jsa-provider-status {
+  padding: 0 8px;
+  font-size: var(--font-ui-smaller, 12px);
+  font-weight: 500;
+  line-height: 1.6;
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: var(--background-modifier-hover);
+}
+
+.jsa-provider-status.is-on {
+  color: var(--color-green, #2ea043);
+  background: color-mix(in srgb, var(--color-green, #2ea043) 14%, transparent);
+}
+
+.jsa-provider-status.is-warn {
+  color: var(--color-orange, #d97706);
+  background: color-mix(in srgb, var(--color-orange, #d97706) 14%, transparent);
+}
+
+.jsa-provider-body {
+  border-top: 1px dashed var(--background-modifier-border);
+  background: var(--background-secondary);
+  border-radius: 0 0 var(--radius-l, 12px) var(--radius-l, 12px);
+}
+
+.jsa-provider-body .jsa-key-input {
+  width: 260px;
+  font-family: var(--font-monospace);
+}
+
+.jsa-provider-result {
+  padding: 0 var(--size-4-4, 16px);
+  font-size: var(--font-ui-smaller, 12px);
+  overflow-wrap: anywhere;
+}
+
+.jsa-provider-result:empty {
+  display: none;
+}
+
+.jsa-provider-result.is-ok {
+  color: var(--color-green, #2ea043);
+}
+
+.jsa-provider-result.is-error {
+  color: var(--text-error);
+}
